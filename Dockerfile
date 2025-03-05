@@ -8,7 +8,7 @@ ENV TZ=UTC \
     DEBIAN_FRONTEND=noninteractive
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-COPY ENTRYPOINT.sh /
+COPY scripts/ENTRYPOINT.sh /
 
 # Install required packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,7 +46,7 @@ RUN rm -rf /var/lib/apt/lists/* \
 
 # Clone Mininet repository
 RUN git clone https://github.com/mininet/mininet.git
-COPY miniedit.py /root/mininet/examples/miniedit.py
+COPY utils/miniedit.py /root/mininet/examples/miniedit.py
 
 # Update pip and install ryu using Python 3
 RUN python3 -m pip install --upgrade pip
@@ -59,6 +59,12 @@ RUN python3 -m pip install ryu
 RUN ln -sf /usr/bin/ovs-testcontroller /usr/bin/controller
 
 # Expose ports for OpenFlow and OVS
+# 6633/6653: OpenFlow controller ports
+# 6640: OVS manager port
 EXPOSE 6633 6653 6640
+
+# To run with an external controller:
+# 1. Run the container with: docker run -p 6633:6633 -p 6653:6653 -p 6640:6640 -e CONTROLLER_IP=<external_ip> -e CONTROLLER_PORT=6653 <image_name>
+# 2. Or use host networking: docker run --network=host -e CONTROLLER_IP=<external_ip> -e CONTROLLER_PORT=6653 <image_name>
 
 ENTRYPOINT ["/ENTRYPOINT.sh"]

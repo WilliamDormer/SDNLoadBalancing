@@ -102,7 +102,13 @@ else
     -v /lib/modules:/lib/modules \
     -v $(pwd):/root/SDNLoadBalancing \
     --network host \
-    -p 6633:6633 -p 6653:6653 -p 6640:6640 \
+    -p 6633:6633 \
+    -p 6653:6653 \
+    -p 6654:6654 \
+    -p 6655:6655 \
+    -p 6656:6656 \
+    -p 6657:6657 \
+    -p 6640:6640 \
     --restart unless-stopped \
     -it $IMAGE_NAME
 fi
@@ -112,3 +118,5 @@ echo "Attaching to the container..."
 docker attach $CONTAINER_NAME
 
 echo "Container '$CONTAINER_NAME' stopped." 
+docker stop $CONTAINER_NAME
+docker rm $CONTAINER_NAME

@@ -5,11 +5,12 @@ from mininet.node import Controller, RemoteController
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
+import time
 
 
 def create_topology():
-    # Create a network with a remote controller
-    net = Mininet(controller=RemoteController, link=TCLink)
+    """Create a simple topology with just two switches connected directly"""
+    net = Mininet(topo=None, build=False)
 
     # Add controller
     info("*** Adding controller\n")
@@ -22,18 +23,14 @@ def create_topology():
 
     # Add hosts
     info("*** Adding hosts\n")
-    h1 = net.addHost("h1", mac="00:00:00:00:00:01", ip="10.0.0.1/24")
-    h2 = net.addHost("h2", mac="00:00:00:00:00:02", ip="10.0.0.2/24")
-    h3 = net.addHost("h3", mac="00:00:00:00:00:03", ip="10.0.0.3/24")
-    h4 = net.addHost("h4", mac="00:00:00:00:00:04", ip="10.0.0.4/24")
+    h1 = net.addHost("h1", ip="10.0.0.1/8", mac="00:00:00:00:00:01")
+    h2 = net.addHost("h2", ip="10.0.0.2/8", mac="00:00:00:00:00:02")
 
     # Add links
-    info("*** Creating links\n")
+    info("*** Adding links\n")
     net.addLink(h1, s1)
-    net.addLink(h2, s1)
-    net.addLink(s1, s2)
-    net.addLink(h3, s2)
-    net.addLink(h4, s2)
+    net.addLink(h2, s2)
+    net.addLink(s1, s2)  # Direct link between switches
 
     # Start network
     info("*** Starting network\n")
@@ -42,9 +39,21 @@ def create_topology():
     s1.start([c0])
     s2.start([c0])
 
+    # Wait for controller to initialize
+    info("*** Waiting for controller initialization (5 seconds)...\n")
+    time.sleep(5)
+
+    # Test connectivity
+    info("*** Testing connectivity\n")
+    info("*** Ping: h1 -> h2\n")
+    result = h1.cmd("ping -c 3 %s" % h2.IP())
+    info(result + "\n")
+
+    # Start CLI
     info("*** Running CLI\n")
     CLI(net)
 
+    # Stop network
     info("*** Stopping network\n")
     net.stop()
 

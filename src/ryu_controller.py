@@ -15,24 +15,26 @@
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu import cfg
 from ryu.lib import hub
-from flask import Flask, jsonify
-import os
-import requests
-import sys
-import time # used for the flow rate calculation.
+from flask import Flask, jsonify, request
+import urllib.request
+import urllib.error
+import json
+import time  # used for the flow rate calculation.
+import uuid
 
-class ExampleSwitch13(app_manager.RyuApp):
+
+class DomainController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(ExampleSwitch13, self).__init__(*args, **kwargs)
+        super(DomainController, self).__init__(*args, **kwargs)
         # initialize mac address table.
         self.mac_to_port = {}
 
@@ -40,89 +42,192 @@ class ExampleSwitch13(app_manager.RyuApp):
         self.CONF = cfg.CONF
 
         # Register configuration option for listen port
-        self.CONF.register_opts([
-            cfg.IntOpt("total_switches", default=-1, help=("The total number of switches in the network")),
-            cfg.StrOpt("global_controller_ip", default="127.0.0.1", help=("The global controller's ip address")),
-            cfg.StrOpt("global_controller_flask_port", default="-1", help=("The port of the flask endpoint running on global controller"))      
-        ])
+        self.CONF.register_opts(
+            [
+                cfg.IntOpt(
+                    "total_switches",
+                    default=-1,
+                    help=("The total number of switches in the network"),
+                ),
+                cfg.StrOpt(
+                    "global_controller_ip",
+                    default="127.0.0.1",
+                    help=("The global controller's ip address"),
+                ),
+                cfg.StrOpt(
+                    "global_controller_flask_port",
+                    default="8000",
+                    help=(
+                        "The port of the flask endpoint running on global controller"
+                    ),
+                ),
+                cfg.StrOpt(
+                    "controller_id",
+                    default="",
+                    help=("Unique identifier for this controller"),
+                ),
+            ]
+        )
 
-        
         # Access the listen port
         self.listen_port = self.CONF.ofp_tcp_listen_port
-        self.flask_port = self.listen_port + 500 # assign a new port to use for communication with the global controller.
-        
-        # print("listen_port: ", self.listen_port)
 
-        # send message to the global controller to register
-
-
-        print("total_switches: ", self.CONF.total_switches)
-
-        # # for tracking in-messages for deep learning state vector
-        # self.total_switches = int(kwargs.get('total_switches', -1))
-        # if self.total_switches < 0:
-        #     raise Exception("argument missing: total_switches. This should be the total number of switches in your network")
-
-        # self.in_flows = [0]*self.total_switches # the number of packet flows in from 
+        # Generate or use controller ID
+        if self.CONF.controller_id:
+            self.controller_id = self.CONF.controller_id
+        else:
+            self.controller_id = f"controller-{self.listen_port}"
 
         # Read the argument value
         self.total_switches = self.CONF.total_switches
-        # Initialize an array to track in-messages per switch
-        self.in_flows = [0] * self.total_switches 
 
-        self.register_with_global_controller()
+        # State tracking components
+        self.datapaths = {}  # Store active datapaths
+        self.controller_switch_mapping = (
+            {}
+        )  # g_hi(t) - maps switch DPIDs to controller ID
+        self.in_flows = [0] * self.total_switches  # Packet-in counter for each switch
+        self.in_rate = [0] * self.total_switches  # Packet-in rate for each switch
+        self.controller_load = 0  # Overall controller load
+        self.start_time = time.perf_counter()  # High-precision timer
 
+        # Set up Flask server for communication with global controller
+        self.flask_port = self.listen_port + 500  # Use a different port for Flask
         self.app = Flask(__name__)
 
-        @self.app.route('/get_state', methods=["GET"])
-        def get_state():
-            # return the in flows (state vector) #TODO modify this to use flow rate instead
-            # compute the time difference
-            timediff_s = time.perf_counter() - self.start_time
-            # divide each by time to get rate 
-            self.in_rate = [x / timediff_s for x in self.in_flows]
-            # reset the in_flows and time
-            self.in_flows = [0] * self.total_switches 
-            self.start_time = time.perf_counter()
-            # send to the global controller
-            return jsonify(state_vector=self.in_rate)
+        # Define Flask routes
 
+        @self.app.route("/controller_state", methods=["GET"])
+        def get_controller_state():
+            """
+            Consolidated endpoint that returns all controller state information
+            """
+            # Calculate packet-in rates
+            self.calculate_packet_in_rates()
+
+            # Calculate controller load
+            self.calculate_controller_load()
+
+            state = {
+                "controller_id": self.controller_id,
+                "controller_load": self.controller_load,
+                "controller_switch_mapping": {
+                    str(k): v for k, v in self.controller_switch_mapping.items()
+                },
+                "packet_in_rates": {
+                    str(dpid): self.in_rate[dpid - 1]
+                    for dpid in self.controller_switch_mapping
+                },
+            }
+            print("state: ", state)
+            return jsonify(state)
+
+        # Start Flask server in a separate thread
         self.flask_thread = hub.spawn(self.run_flask)
 
-        self.start_time = time.perf_counter()  # High-precision timer
-        
+        # Register with global controller
+        self.register_with_global_controller()
+
+
+    def run_flask(self):
+        """
+        Run the Flask server
+        """
+        self.app.run(host="127.0.0.1", port=self.flask_port)
 
     def register_with_global_controller(self):
         global_controller_ip = self.CONF.global_controller_ip
         global_controller_flask_port = self.CONF.global_controller_flask_port
-        global_controller_url = f"http://{global_controller_ip}:{global_controller_flask_port}/register"
+        global_controller_url = (
+            f"http://{global_controller_ip}:{global_controller_flask_port}/register"
+        )
 
         # define the payload
         data = {
+            "controller_id": self.controller_id,
             "controller_ip": "127.0.0.1",  # The domain controller's IP
-            # "controller_port": self.listen_port,
-            "flask_port": self.flask_port
+            "controller_port": self.listen_port,
+            "flask_port": self.flask_port,  # Add the Flask port for communication
         }
 
         while True:
             try:
-                # Send a POST request to the global controller to register
-                response = requests.post(global_controller_url, json=data)
-                if response.status_code == 200:
-                    self.logger.info(f"Successfully registered with the global controller: {response.text}")
-                    return
-                else:
-                    self.logger.error(f"Failed to register with global controller, status code: {response.status_code}")
-                    raise Exception("Failed to register with the global controller")
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Error while trying to connect to the global controller: {e}")
-            
+                # Convert data to JSON and encode as bytes
+                json_data = json.dumps(data).encode("utf-8")
+
+                # Create request object
+                req = urllib.request.Request(
+                    global_controller_url,
+                    data=json_data,
+                    headers={"Content-Type": "application/json"},
+                )
+
+                # Send the request
+                with urllib.request.urlopen(req) as response:
+                    response_text = response.read().decode("utf-8")
+                    response_code = response.getcode()
+
+                    if response_code == 200:
+                        self.logger.info(
+                            f"Successfully registered with the global controller: {response_text}"
+                        )
+                        return
+                    else:
+                        self.logger.error(
+                            f"Failed to register with global controller, status code: {response_code}"
+                        )
+                        raise Exception("Failed to register with the global controller")
+            except urllib.error.HTTPError as e:
+                self.logger.error(
+                    f"HTTP Error while trying to connect to the global controller: {e.code} {e.reason}"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"Unexpected error while trying to connect to the global controller: {e}"
+                )
+
             # Wait for a while before sending the next "hello" message (e.g., every 30 seconds)
             hub.sleep(30)
 
-    def run_flask(self):
-        self.app.run(host="127.0.0.1", port=self.flask_port)
-    
+    def calculate_packet_in_rates(self):
+        """
+        Calculate packet-in rates for all switches
+        """
+        timediff_s = time.perf_counter() - self.start_time
+        if timediff_s > 0:
+            # Calculate rates
+            self.in_rate = [x / timediff_s for x in self.in_flows]
+            # Reset counters
+            self.in_flows = [0] * self.total_switches
+            self.start_time = time.perf_counter()
+
+    def calculate_controller_load(self):
+        """
+        Calculate overall controller load
+        """
+        # For simplicity, use sum of packet-in rates as controller load
+        self.controller_load = sum(self.in_rate)
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
+    def state_change_handler(self, ev):
+        """
+        Handle switch connect/disconnect events
+        """
+        datapath = ev.datapath
+        if ev.state == MAIN_DISPATCHER:
+            if datapath.id not in self.datapaths:
+                self.logger.info(f"Switch {datapath.id} connected")
+                self.datapaths[datapath.id] = datapath
+                # Update controller-switch mapping
+                self.controller_switch_mapping[datapath.id] = self.controller_id
+        elif ev.state == DEAD_DISPATCHER:
+            if datapath.id in self.datapaths:
+                self.logger.info(f"Switch {datapath.id} disconnected")
+                del self.datapaths[datapath.id]
+                # Update controller-switch mapping
+                if datapath.id in self.controller_switch_mapping:
+                    del self.controller_switch_mapping[datapath.id]
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -131,8 +236,9 @@ class ExampleSwitch13(app_manager.RyuApp):
 
         # install the table-miss flow entry.
         match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
+        actions = [
+            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)
+        ]
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions):
@@ -140,15 +246,14 @@ class ExampleSwitch13(app_manager.RyuApp):
         parser = datapath.ofproto_parser
 
         # construct flow_mod message and send it.
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                             actions)]
-        mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                match=match, instructions=inst)
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(
+            datapath=datapath, priority=priority, match=match, instructions=inst
+        )
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -165,14 +270,14 @@ class ExampleSwitch13(app_manager.RyuApp):
         src = eth_pkt.src
 
         # get the received port number from packet_in message.
-        in_port = msg.match['in_port']
+        in_port = msg.match["in_port"]
 
-        # self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
-        
+        # self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
+
         # update in_flows
-        print(f"packet in from {dpid}")
-        self.in_flows[dpid-1] += 1
-        
+        if dpid <= self.total_switches:
+            self.in_flows[dpid - 1] += 1
+
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
 
@@ -192,8 +297,11 @@ class ExampleSwitch13(app_manager.RyuApp):
             self.add_flow(datapath, 1, match, actions)
 
         # construct packet_out message and send it.
-        out = parser.OFPPacketOut(datapath=datapath,
-                                  buffer_id=ofproto.OFP_NO_BUFFER,
-                                  in_port=in_port, actions=actions,
-                                  data=msg.data)
+        out = parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=ofproto.OFP_NO_BUFFER,
+            in_port=in_port,
+            actions=actions,
+            data=msg.data,
+        )
         datapath.send_msg(out)

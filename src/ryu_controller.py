@@ -20,7 +20,13 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
-
+from ryu import cfg
+from ryu.lib import hub
+from flask import Flask, jsonify
+import os
+import requests
+import sys
+import time # used for the flow rate calculation.
 
 class ExampleSwitch13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -30,6 +36,93 @@ class ExampleSwitch13(app_manager.RyuApp):
         # initialize mac address table.
         self.mac_to_port = {}
 
+        # Define a command-line argument
+        self.CONF = cfg.CONF
+
+        # Register configuration option for listen port
+        self.CONF.register_opts([
+            cfg.IntOpt("total_switches", default=-1, help=("The total number of switches in the network")),
+            cfg.StrOpt("global_controller_ip", default="127.0.0.1", help=("The global controller's ip address")),
+            cfg.StrOpt("global_controller_flask_port", default="-1", help=("The port of the flask endpoint running on global controller"))      
+        ])
+
+        
+        # Access the listen port
+        self.listen_port = self.CONF.ofp_tcp_listen_port
+        self.flask_port = self.listen_port + 500 # assign a new port to use for communication with the global controller.
+        
+        # print("listen_port: ", self.listen_port)
+
+        # send message to the global controller to register
+
+
+        print("total_switches: ", self.CONF.total_switches)
+
+        # # for tracking in-messages for deep learning state vector
+        # self.total_switches = int(kwargs.get('total_switches', -1))
+        # if self.total_switches < 0:
+        #     raise Exception("argument missing: total_switches. This should be the total number of switches in your network")
+
+        # self.in_flows = [0]*self.total_switches # the number of packet flows in from 
+
+        # Read the argument value
+        self.total_switches = self.CONF.total_switches
+        # Initialize an array to track in-messages per switch
+        self.in_flows = [0] * self.total_switches 
+
+        self.register_with_global_controller()
+
+        self.app = Flask(__name__)
+
+        @self.app.route('/get_state', methods=["GET"])
+        def get_state():
+            # return the in flows (state vector) #TODO modify this to use flow rate instead
+            # compute the time difference
+            timediff_s = time.perf_counter() - self.start_time
+            # divide each by time to get rate 
+            self.in_rate = [x / timediff_s for x in self.in_flows]
+            # reset the in_flows and time
+            self.in_flows = [0] * self.total_switches 
+            self.start_time = time.perf_counter()
+            # send to the global controller
+            return jsonify(state_vector=self.in_rate)
+
+        self.flask_thread = hub.spawn(self.run_flask)
+
+        self.start_time = time.perf_counter()  # High-precision timer
+        
+
+    def register_with_global_controller(self):
+        global_controller_ip = self.CONF.global_controller_ip
+        global_controller_flask_port = self.CONF.global_controller_flask_port
+        global_controller_url = f"http://{global_controller_ip}:{global_controller_flask_port}/register"
+
+        # define the payload
+        data = {
+            "controller_ip": "127.0.0.1",  # The domain controller's IP
+            # "controller_port": self.listen_port,
+            "flask_port": self.flask_port
+        }
+
+        while True:
+            try:
+                # Send a POST request to the global controller to register
+                response = requests.post(global_controller_url, json=data)
+                if response.status_code == 200:
+                    self.logger.info(f"Successfully registered with the global controller: {response.text}")
+                    return
+                else:
+                    self.logger.error(f"Failed to register with global controller, status code: {response.status_code}")
+                    raise Exception("Failed to register with the global controller")
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"Error while trying to connect to the global controller: {e}")
+            
+            # Wait for a while before sending the next "hello" message (e.g., every 30 seconds)
+            hub.sleep(30)
+
+    def run_flask(self):
+        self.app.run(host="127.0.0.1", port=self.flask_port)
+    
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -55,6 +148,7 @@ class ExampleSwitch13(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        
         msg = ev.msg
         datapath = msg.datapath
         ofproto = datapath.ofproto
@@ -74,7 +168,11 @@ class ExampleSwitch13(app_manager.RyuApp):
         in_port = msg.match['in_port']
 
         # self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
-
+        
+        # update in_flows
+        print(f"packet in from {dpid}")
+        self.in_flows[dpid-1] += 1
+        
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
 

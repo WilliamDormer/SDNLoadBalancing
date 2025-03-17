@@ -27,6 +27,12 @@ class GlobalController(app_manager.RyuApp):
             cfg.ListOpt('capacities', default = None, help = ('A list of capacities for each controller (ordered by IP then port)'))
         ]) 
 
+        #TODO add a dynamic way to get this:
+        self.switches_by_controller = [
+            [0], # first controller's switches (owns switch 1)
+            [1] # second controller's switches (owns switch 2)
+        ]
+
         self.m = self.CONF.num_controllers
         self.n = self.CONF.total_switches
 
@@ -100,13 +106,15 @@ class GlobalController(app_manager.RyuApp):
                     
                 # You can add your processing logic here
                 # For example, checking required fields:
-                if 'controller_id' not in data or 'switch_id' not in data:
+                if 'target_controller' not in data or 'switch' not in data:
                     return jsonify({"error": "missing required fields"}), 400  # Bad Request if missing required field
 
                 # execute the migration command
-                ip = self.domain_controllers[data['controller_id']]["ip"]
-                port = self.domain_controllers[data['controller_id']]["port"]
-                subprocess.Popen(f'sudo ovs-vsctl set-controller s{i+1} tcp:{ip}:{port}', shell=True)
+
+                # get the current controller ip
+                ip = self.domain_controllers[data['target_controller']]["ip"]
+                port = self.domain_controllers[data['target_controller']]["port"]
+                subprocess.Popen(f'sudo ovs-vsctl set-controller s{data["switch"]} tcp:{ip}:{port}', shell=True)
                 
                 # Return a success response with a 201 status code (Created) if successful
                 return '', 200
@@ -114,7 +122,55 @@ class GlobalController(app_manager.RyuApp):
                 # handle unexpected errors:
                  return jsonify({"error": f"Internal server error: {str(e)}"}), 500  # Internal Server Error on exceptions
 
-            
+        @self.app.route('/state', methods=["GET"])
+        def get_state():
+            '''
+            This function reports the state. 
+            It is intended to be called by the pytorch code via http
+            '''
+            try: 
+                # TODO update the state matrix first, instead of polling regularly.
+                data = jsonify({"data": self.state_matrix.tolist()})
+                
+                # Return a success response with a 201 status code (Created) if successful
+                return data, 200
+            except Exception as e:
+                # handle unexpected errors:
+                 return jsonify({"error": f"Internal server error: {str(e)}"}), 500  # Internal Server Error on exceptions
+
+        @self.app.route('/capacities', methods=["GET"])
+        def get_capacities():
+            '''
+            This function reports the capacities of the controllers. 
+            It is intended to be called by the pytorch code via http
+            '''
+            print("reporting capacities to deep learning system")
+            try: 
+                # TODO update the state matrix first, instead of polling regularly.
+                data = jsonify({"data": self.capacities.tolist()})
+                
+                # Return a success response with a 201 status code (Created) if successful
+                return data, 200
+            except Exception as e:
+                # handle unexpected errors:
+                 return jsonify({"error": f"Internal server error: {str(e)}"}), 500  # Internal Server Error on exceptions
+
+        @self.app.route('/switches_by_controller', methods=["GET"])
+        def get_switch_by_controller():
+            '''
+            This function reports which controller owns each switch. 
+            It is intended to be called by the pytorch code via http
+            '''
+            print("reporting switch configuration to deep learning system")
+            try: 
+                # TODO update the state matrix first, instead of polling regularly.
+                data = jsonify({"data": self.switches_by_controller})
+                
+                # Return a success response with a 201 status code (Created) if successful
+                return data, 200
+            except Exception as e:
+                # handle unexpected errors:
+                 return jsonify({"error": f"Internal server error: {str(e)}"}), 500  # Internal Server Error on exceptions
 
         # # testing the switch migration code
         # hub.sleep(1) 
@@ -149,25 +205,25 @@ class GlobalController(app_manager.RyuApp):
             # size m x n where m is the number of domain controllers, n is the number of switches. 
             print("state_matrix: ", self.state_matrix)
             
-            # compute the load ratio for each one (the steps below here would actually take place in the deep learning training loop.)
+            # # compute the load ratio for each one (the steps below here would actually take place in the deep learning training loop.)
             
-            # compute Lh(t) by summing each row of the state matrix
-            L = np.sum(self.state_matrix, axis=1)
-            print("L: ", L)
+            # # compute Lh(t) by summing each row of the state matrix
+            # L = np.sum(self.state_matrix, axis=1)
+            # print("L: ", L)
 
-            # compute Bh(t) by dividing each by uh (capacities)
-            B = L / self.capacities
-            print("load_ratios: ", B)
+            # # compute Bh(t) by dividing each by uh (capacities)
+            # B = L / self.capacities
+            # print("load_ratios: ", B)
 
-            # compute B_bar (average load) by 
-            B_bar = np.sum(B) / self.m
-            print("average load: ", B_bar)
+            # # compute B_bar (average load) by 
+            # B_bar = np.sum(B) / self.m
+            # print("average load: ", B_bar)
 
-            # compute the controller load balancing rate, D(t)
-            numerator = np.sqrt(np.sum((B - B_bar) ** 2) / self.m)  # Compute standard deviation
-            if B_bar != 0:
-                D_t = numerator / B_bar  # Final computation
-                print("D_t (degree of balancing): ", D_t)
+            # # compute the controller load balancing rate, D(t)
+            # numerator = np.sqrt(np.sum((B - B_bar) ** 2) / self.m)  # Compute standard deviation
+            # if B_bar != 0:
+            #     D_t = numerator / B_bar  # Final computation
+            #     print("D_t (degree of balancing): ", D_t)
         
             # Sleep for the specified interval before the next polling cycle
             hub.sleep(self.poll_interval)

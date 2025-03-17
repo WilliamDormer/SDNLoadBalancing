@@ -119,7 +119,6 @@ class DomainController(app_manager.RyuApp):
                     for dpid in self.controller_switch_mapping
                 },
             }
-            print("state: ", state)
             return jsonify(state)
 
         # Start Flask server in a separate thread

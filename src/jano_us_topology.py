@@ -126,12 +126,17 @@ class JanosUSTopology:
         self.max_bw = max_bw
         self.flow_duration = flow_duration
 
+        self.create_network()
+        self.start_network()
+        self.run_simulation()
+
     def __del__(self):
         """
         Clean up the Mininet network when the object is deleted.
         """
-        self.net.stop()
-        Cleanup()
+        if self.net:
+            self.net.stop()
+            Cleanup()
 
     def create_network(self):
         """
@@ -360,8 +365,5 @@ class JanosUSTopology:
 
 if __name__ == "__main__":
     topology = JanosUSTopology()
-    topology.create_network()
-    topology.start_network()
-    topology.run_simulation()
     time.sleep(60)
     topology.reset()

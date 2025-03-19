@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import argparse
 
 sys.path.append("/root/mininet/")
 
@@ -25,16 +26,7 @@ class JanosUSTopology:
     for use with a Gym environment.
     """
 
-    def __init__(
-        self,
-        host_ip="192.168.2.33",
-        base_lambda=5.0,
-        amplitude=3.0,
-        period=60.0,
-        duration=300,
-        max_bw="10M",
-        flow_duration=5,
-    ):
+    def __init__(self, args):
         """
         Initialize the JanosUSTopology.
 
@@ -47,7 +39,8 @@ class JanosUSTopology:
             max_bw (str): Maximum bandwidth for the iperf flows
             flow_duration (int): Duration of each iperf flow
         """
-        self.HOST_IP = host_ip
+        self.args = args
+        self.HOST_IP = args.host_ip
         self.net = None
         self.switches = {}
         self.hosts = {}
@@ -119,16 +112,14 @@ class JanosUSTopology:
         ]
 
         # Define parameters for the simulation
-        self.base_lambda = base_lambda
-        self.amplitude = amplitude
-        self.period = period
-        self.duration = duration
-        self.max_bw = max_bw
-        self.flow_duration = flow_duration
-
+        self.base_lambda = args.base_lambda
+        self.amplitude = args.amplitude
+        self.period = args.period
+        self.max_bw = args.max_bw
+        self.flow_duration = args.flow_duration
+        self.is_resetting = False
         self.create_network()
         self.start_network()
-        self.run_simulation()
 
     def __del__(self):
         """
@@ -136,8 +127,7 @@ class JanosUSTopology:
         """
         if self.net:
             self.net.stop()
-            Cleanup()
-
+        os.system("sudo mn -c")
     def create_network(self):
         """
         Create a fresh Mininet network with the Janos-US topology.
@@ -220,7 +210,7 @@ class JanosUSTopology:
 
         # Wait for network to stabilize
         info("*** Waiting for network to stabilize\n")
-        time.sleep(5)
+        time.sleep(10)
 
     def reset(self):
         """
@@ -232,11 +222,14 @@ class JanosUSTopology:
         # Clean up existing network if it exists
         if self.net:
             info("*** Stopping any existing network\n")
+            self.is_resetting = True
+            # reset flow tables
+            for switch in self.net.switches:
+                switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
             # Kill any running iperf processes
             for host in self.net.hosts:
                 host.cmd("killall iperf")
             self.net.stop()
-            Cleanup()
 
             # Clear references
             self.net = None
@@ -249,7 +242,7 @@ class JanosUSTopology:
 
         # Start network
         self.start_network()
-
+        self.is_resetting = False
         return self.net
 
     def run_simulation(self):
@@ -341,29 +334,17 @@ class JanosUSTopology:
             # Start iperf traffic
             self.start_iperf_flow(src_host, dst_host)
 
-        # Schedule next flow generation (in 1 second)
-        threading.Timer(
-            1.0,
-            self.generate_flows,
-            [end_time],
-        ).start()
-
-    def clear_flow_tables(self, end_time, interval=30):
-        """Periodically clear flow tables to force new packet-in messages."""
-        current_time = time.time()
-
-        if current_time >= end_time:
-            return
-
-        info(f"*** Clearing flow tables at {time.strftime('%H:%M:%S')}\n")
-        for switch in self.net.switches:
-            switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
-
-        # Schedule next clearing
-        threading.Timer(interval, self.clear_flow_tables, [end_time, interval]).start()
-
 
 if __name__ == "__main__":
-    topology = JanosUSTopology()
-    time.sleep(60)
-    topology.reset()
+
+    # command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host_ip", type=str, default="192.168.2.33")
+    parser.add_argument("--base_lambda", type=float, default=5.0)
+    parser.add_argument("--amplitude", type=float, default=3.0)
+    parser.add_argument("--period", type=float, default=60.0)
+    parser.add_argument("--max_bw", type=str, default="10M")
+    parser.add_argument("--flow_duration", type=int, default=5)
+    args = parser.parse_args()
+
+    topology = JanosUSTopology(args)

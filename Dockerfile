@@ -54,6 +54,7 @@ RUN python3 -m pip install --upgrade setuptools
 # Install a compatible version of eventlet before installing Ryu
 RUN python3 -m pip install eventlet==0.30.2
 RUN python3 -m pip install ryu
+RUN pip install numpy flask
 
 # Set up OVS controller symlink
 RUN ln -sf /usr/bin/ovs-testcontroller /usr/bin/controller

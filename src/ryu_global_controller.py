@@ -10,7 +10,6 @@ import urllib.error
 import json
 import subprocess
 import numpy as np
-import time
 
 
 class GlobalController(app_manager.RyuApp):
@@ -174,10 +173,7 @@ class GlobalController(app_manager.RyuApp):
             It is intended to be called by the pytorch code via http
             """
             try:
-                # update the state matrix first
-                self.poll_domain_controllers()
                 data = jsonify({"state": self.state_matrix.tolist()})
-
                 # Return a success response with a 201 status code (Created) if successful
                 return data, 200
             except Exception as e:
@@ -226,6 +222,20 @@ class GlobalController(app_manager.RyuApp):
                     jsonify({"error": f"Internal server error: {str(e)}"}),
                     500,
                 )  # Internal Server Error on exceptions
+        
+        @self.app.route("/reset", methods=["POST"])
+        def reset():
+            """
+            This function resets the network.
+            """
+            print("resetting the network")
+            try:
+                # reset the network 
+                req = urllib.request.Request("http://localhost:9000/reset_topology")
+                urllib.request.urlopen(req)
+                return "", 200
+            except Exception as e:
+                return (jsonify({"error": f"Internal server error: {str(e)}"}), 500)
 
         # # testing the switch migration code
         # hub.sleep(1)
@@ -237,10 +247,10 @@ class GlobalController(app_manager.RyuApp):
 
         # now that we have registered the controllers, we can begin polling for network traffic information.
 
-        # # Polling interval in seconds
-        # self.poll_interval = 1
-        # # Periodic polling using greenlet
-        # self.poll_thread = hub.spawn(self.poll_domain_controllers)
+        # Polling interval in seconds
+        self.poll_interval = 1
+        # Periodic polling using greenlet
+        self.poll_thread = hub.spawn(self.poll_domain_controllers)
 
     def run_flask(self):
         self.app.run(host="0.0.0.0", port=self.flask_port)
@@ -249,36 +259,39 @@ class GlobalController(app_manager.RyuApp):
         """
         Polls the domain controllers for their state, then sets the hub to sleep for the poll interval.
         """
-        # Reset state matrix
-        self.state_matrix = np.zeros((self.m, self.n))
+        while True:
+            # # Reset state matrix
+            # self.state_matrix = np.zeros((self.m, self.n))
 
-        # Poll each controller for its state
-        for i, controller in enumerate(self.domain_controllers):
-            controller_state = self._get_controller_state(
-                controller["ip"], controller["port"]
-            )
+            # Poll each controller for its state
+            for i, controller in enumerate(self.domain_controllers):
+                controller_state = self._get_controller_state(
+                    controller["ip"], controller["port"]
+                )
 
-            if controller_state:
-                # Extract packet-in rates from the controller state
-                packet_in_rates = controller_state.get("packet_in_rates", {})
+                if controller_state:
+                    # Extract packet-in rates from the controller state
+                    packet_in_rates = controller_state.get("packet_in_rates", {})
 
-                # Convert to state vector
-                state_vector = [0] * self.n
-                for switch_id_str, rate in packet_in_rates.items():
-                    try:
-                        # Convert string switch ID to integer and adjust for 0-indexing
-                        switch_idx = int(switch_id_str) - 1
-                        if 0 <= switch_idx < self.n:
-                            state_vector[switch_idx] = rate
-                    except (ValueError, IndexError):
-                        self.logger.error(f"Invalid switch ID: {switch_id_str}")
+                    # Convert to state vector
+                    state_vector = [0] * self.n
+                    for switch_id_str, rate in packet_in_rates.items():
+                        try:
+                            # Convert string switch ID to integer and adjust for 0-indexing
+                            switch_idx = int(switch_id_str) - 1
+                            if 0 <= switch_idx < self.n:
+                                state_vector[switch_idx] = rate
+                        except (ValueError, IndexError):
+                            self.logger.error(f"Invalid switch ID: {switch_id_str}")
 
-                # Update state matrix
-                self.state_matrix[i, :] = state_vector
+                    # Update state matrix
+                    self.state_matrix[i, :] = state_vector
 
-        # Combine the results from the domain controllers into a single state vector
-        # size m x n where m is the number of domain controllers, n is the number of switches.
-        print("state_matrix: ", self.state_matrix)
+            # Combine the results from the domain controllers into a single state vector
+            # size m x n where m is the number of domain controllers, n is the number of switches.
+            print("state_matrix: ", self.state_matrix)
+
+            hub.sleep(self.poll_interval)
 
 
     def _get_controller_state(self, ip, port):

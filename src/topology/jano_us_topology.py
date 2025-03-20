@@ -13,9 +13,7 @@ from mininet.net import Mininet
 from mininet.node import RemoteController
 from mininet.link import TCLink
 from mininet.log import info, setLogLevel
-from mininet.clean import Cleanup
-import threading
-
+import math
 # At the beginning of your main code
 setLogLevel("info")  # Options: 'debug', 'info', 'warning', 'error', 'critical'
 
@@ -32,12 +30,13 @@ class JanosUSTopology:
 
         Args:
             host_ip (str): IP address of the controller host
-            base_lambda (float): Base lambda for the Poisson process
+            rate (float): Rate of the Poisson process
             amplitude (float): Amplitude for the sinusoidal fluctuation
             period (float): Period of the sinusoidal fluctuation
             duration (int): Duration of the simulation
             max_bw (str): Maximum bandwidth for the iperf flows
             flow_duration (int): Duration of each iperf flow
+            time_scale (float): Time scale for the simulation
         """
         self.args = args
         self.HOST_IP = args.host_ip
@@ -112,11 +111,13 @@ class JanosUSTopology:
         ]
 
         # Define parameters for the simulation
-        self.base_lambda = args.base_lambda
-        self.amplitude = args.amplitude
-        self.period = args.period
+        self.base_rate = args.base_rate
+        self.fluctuation_amplitude = args.fluctuation_amplitude
+        self.period_hours = args.period_hours
+        self.total_hours = args.total_hours
         self.max_bw = args.max_bw
         self.flow_duration = args.flow_duration
+        self.time_scale = args.time_scale
         self.is_resetting = False
         self.create_network()
         self.start_network()
@@ -244,28 +245,95 @@ class JanosUSTopology:
         self.start_network()
         self.is_resetting = False
         return self.net
+    
+    def generate_poisson_with_fluctuation(self):
+        """
+        Generate event times following a Poisson process with periodic fluctuation.
+        
+        Args:
+            base_rate: Base rate of the Poisson process (events per hour)
+            fluctuation_amplitude: Amplitude of the sinusoidal fluctuation (0-1 scale)
+            period_hours: Period of fluctuation in hours
+            total_hours: Total simulation time in hours
+        
+        Returns:
+            List of event times in seconds
+        """
+        total_seconds = self.total_hours * 3600
+        time_points = []
+        current_time = 0
+        
+        while current_time < total_seconds:
+            # Calculate time-varying rate using sinusoidal fluctuation
+            hour_of_day = (current_time / 3600) % self.period_hours
+            fluctuation_factor = 1 + self.fluctuation_amplitude * math.sin(2 * math.pi * hour_of_day / self.period_hours)
+            current_rate = self.base_rate * fluctuation_factor / 3600  # Convert to per-second rate
+            
+            # Generate next interval using current rate
+            next_interval = np.random.exponential(1 / current_rate)
+            current_time += next_interval
+            
+            if current_time < total_seconds:
+                time_points.append(current_time)
+        
+        return np.array(time_points)
+
+
 
     def run_simulation(self):
         """Run the traffic simulation with the specified parameters."""
         info("*** Starting traffic simulation\n")
         info(
-            f"*** Parameters: base_lambda={self.base_lambda}, amplitude={self.amplitude}, period={self.period}s, duration={self.duration}s\n"
+            f"*** Parameters: base_rate={self.base_rate}, fluctuation_amplitude={self.fluctuation_amplitude}, period_hours={self.period_hours}, total_hours={self.total_hours}\n"
         )
         info("*** Waiting for 10 seconds before starting simulation\n")
         time.sleep(10)
+        hosts = self.net.hosts
+        num_hosts = len(hosts)
 
-        # Calculate end time
-        end_time = time.time() + self.duration
+        # Generate event times
+        info(f"Generating Poisson events with periodical fluctuation...\n")
+        event_times = self.generate_poisson_with_fluctuation()
+        
+        info(f"Scheduled {len(event_times)} flow requests over {self.total_hours} hours\n")
 
-        # Start flow generation
-        self.generate_flows(end_time)
+        # start the simulation
+        start_time = time.time()
 
-        # Start flow table clearing
-        self.clear_flow_tables(end_time)
+        for i, event_time in enumerate(event_times):
+            # Scale time for testing
+            scaled_time = event_time / self.time_scale
+            
+            # Wait until it's time for this event
+            time_to_wait = scaled_time - (time.time() - start_time)
+            if time_to_wait > 0:
+                time.sleep(time_to_wait)
+                
+            # Calculate current hour for logging
+            current_hour = (event_time / 3600) % self.period_hours
+            
+            # Generate random number of flows for this event
+            num_flows = np.random.poisson(self.base_rate)
+            num_flows = min(num_flows,10)
 
-        info(f"*** Simulation will run for {self.duration} seconds\n")
+            for _ in range(num_flows):
+                # Select random source and destination hosts
+                src_idx = np.random.randint(0, num_hosts)
+                dst_idx = np.random.randint(0, num_hosts)
+                while dst_idx == src_idx:
+                    dst_idx = np.random.randint(0, num_hosts)
+                
+                src_host = hosts[src_idx]
+                dst_host = hosts[dst_idx]
+                
+                self.start_iperf_flow(src_host, dst_host, current_hour,i)
+        
+            # Kill any stalled iperf processes periodically
+            if i % 10 == 0:
+                for host in hosts:
+                    host.cmd("pkill -9 -f 'iperf -s' > /dev/null 2>&1")
 
-    def start_iperf_flow(self, src_host, dst_host):
+    def start_iperf_flow(self, src_host, dst_host, current_hour, idx):
         """
         Start an iperf flow between source and destination hosts.
 
@@ -293,7 +361,7 @@ class JanosUSTopology:
         )
 
         info(
-            f"  Flow: {src_host.name} -> {dst_host.name} ({bw_str}, {self.flow_duration}s)\n"
+            f"  Flow {idx+1} at {current_hour:.2f}h: {src_host.name} -> {dst_host.name} ({bw_str}, {self.flow_duration}s)\n"
         )
         return {
             "src": src_host.name,
@@ -303,48 +371,19 @@ class JanosUSTopology:
             "start_time": time.time(),
         }
 
-    def generate_flows(self, end_time):
-        """Generate flows based on Poisson process with periodic fluctuation."""
-        hosts = self.net.hosts
-        current_time = time.time()
-
-        if current_time >= end_time:
-            return
-
-        # Calculate current lambda with periodic fluctuation
-        t = (current_time % self.period) / self.period
-        current_lambda = max(
-            0.1, self.base_lambda + self.amplitude * np.sin(2 * np.pi * t)
-        )
-
-        # Generate number of flows using Poisson distribution
-        num_flows = np.random.poisson(current_lambda)
-        num_flows = min(num_flows, 10)  # Limit max concurrent flows to avoid overload
-
-        # Log current lambda and number of flows
-        info(
-            f"Time: {time.strftime('%H:%M:%S')}, Lambda: {current_lambda:.2f}, Flows: {num_flows}\n"
-        )
-
-        # Generate each flow
-        for _ in range(num_flows):
-            src_host = random.choice(hosts)
-            dst_host = random.choice([h for h in hosts if h != src_host])
-
-            # Start iperf traffic
-            self.start_iperf_flow(src_host, dst_host)
-
 
 if __name__ == "__main__":
 
     # command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--host_ip", type=str, default="192.168.2.33")
-    parser.add_argument("--base_lambda", type=float, default=5.0)
-    parser.add_argument("--amplitude", type=float, default=3.0)
-    parser.add_argument("--period", type=float, default=60.0)
+    parser.add_argument("--base_rate", type=float, default=5.0)
+    parser.add_argument("--fluctuation_amplitude", type=float, default=0.5)
+    parser.add_argument("--period_hours", type=float, default=24.0)
+    parser.add_argument("--total_hours", type=float, default=24.0)
     parser.add_argument("--max_bw", type=str, default="10M")
-    parser.add_argument("--flow_duration", type=int, default=5)
+    parser.add_argument("--flow_duration", type=int, default=10)
+    parser.add_argument("--time_scale", type=float, default=60.0)
     args = parser.parse_args()
 
     topology = JanosUSTopology(args)

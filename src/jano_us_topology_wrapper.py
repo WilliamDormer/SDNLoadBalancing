@@ -77,8 +77,6 @@ class JanosUSTopologyWrapper:
 
         # start simulation
         print("Starting simulation")
-        print(f"Base rate: {self.topology.base_rate}")
-        print(f"Fluctuation amplitude: {self.topology.fluctuation_amplitude}")
         print(f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)")
         self.topology.run_simulation()
     
@@ -92,15 +90,11 @@ class JanosUSTopologyWrapper:
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host_ip", type=str, default="192.168.2.33")
-    parser.add_argument("--base_rate", type=float, default=5.0)
-    parser.add_argument("--fluctuation_amplitude", type=float, default=3.0)
-    parser.add_argument("--period_hours", type=float, default=60.0)
+    parser.add_argument("--period_hours", type=float, default=24.0)
     parser.add_argument("--total_hours", type=float, default=24.0)
-    parser.add_argument("--max_bw", type=str, default="10M")
-    parser.add_argument("--flow_duration", type=int, default=10)
     parser.add_argument("--global_controller_ip", type=str, default="192.168.2.33")
     parser.add_argument("--global_controller_port", type=int, default=8000)
+    parser.add_argument("--flow_duration", type=int, default=10)
     parser.add_argument("--time_scale", type=float, default=60.0)
     args = parser.parse_args()
 

@@ -306,9 +306,6 @@ class JanosUSTopology:
     def reset(self):
         """
         Reset the network by stopping any existing one and creating a fresh topology.
-
-        Returns:
-            Mininet: The newly created network
         """
         # Clean up existing network if it exists
         self.is_resetting = True
@@ -316,25 +313,29 @@ class JanosUSTopology:
 
         if self.net and self.is_started:
             info("*** Stopping any existing network\n")
-            # reset flow tables
-            for switch in self.net.switches:
-                switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
             # Kill any running iperf processes
             for host in self.net.hosts:
-                host.cmd("killall iperf")
-            self.net.stop()
+                host.cmd("killall -9 iperf")
 
-            # Wait for simulation thread to complete with timeout
-            if self.simulation_thread and self.simulation_thread.is_alive():
-                self.simulation_thread.join(timeout=5)  # Wait up to 5 seconds
-                if self.simulation_thread.is_alive():
-                    info("*** Warning: Had to force stop simulation thread\n")
+            info("*** Terminating all threads\n")
+
+            for t in self.threads:
+                t.join()
+            self.simulation_thread.join()
+
+            info("*** All threads terminated\n")
+
+            # reset flow tables and stop network
+            for switch in self.net.switches:
+                switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
+            self.net.stop()
 
             # Clear references
             self.net = None
             self.switches = {}
             self.hosts = {}
             self.controllers = {}
+
         else:
             info("*** Starting network\n")
             self.is_started = True
@@ -349,7 +350,7 @@ class JanosUSTopology:
 
         # Start the simulation
         self.simulation_thread = threading.Thread(target=self.run_simulation)
-        self.simulation_thread.daemon = True  # Make thread daemon
+        self.simulation_thread.daemon = True
         self.simulation_thread.start()
         return self.net
 
@@ -397,7 +398,7 @@ class JanosUSTopology:
         )
 
         # Generate event times for each src-dst pair
-        info(f"Generating Poisson events for each src-dst pair...\n")
+        info(f"*** Generating Poisson events for each src-dst pair...\n")
         time_points = {}
         for src, dst in self.src_dst_pairs:
             base_rate = self.base_rates[src - 1]
@@ -408,7 +409,7 @@ class JanosUSTopology:
         start_time = time.time()
 
         # Run the Poisson process for each src-dst pair
-        threads = []
+        self.threads = []
         for src_dst_pair, points in time_points.items():
             thread = threading.Thread(
                 target=self.run_poisson_process,
@@ -420,76 +421,85 @@ class JanosUSTopology:
                     start_time,
                 ),
             )
-            threads.append(thread)
+            self.threads.append(thread)
             thread.daemon = (
                 True  # Make threads daemon so they exit when main program exits
             )
 
         # Start all threads
-        for t in threads:
+        for t in self.threads:
             t.start()
 
         # Wait for all threads to complete
-        for t in threads:
+        for t in self.threads:
             t.join()
 
     def run_poisson_process(
         self, src_dst_pair, time_points, duration, time_scale, start_time
     ):
         """Run the Poisson process for a given src-dst pair."""
-        end_time = start_time + duration
+        try:
+            end_time = start_time + duration
+            src_num, dst_num = src_dst_pair
 
-        src_host = self.hosts[f"h{src_dst_pair[0]}"]
-        dst_host = self.hosts[f"h{src_dst_pair[1]}"]
+            for time_point in sorted(time_points):
+                # Check if we should stop
+                if self.stop_simulation or time.time() >= end_time:
+                    break
 
-        for time_point in sorted(time_points):
-            # Check if we should stop
-            if self.stop_simulation or time.time() >= end_time:
-                break
+                # Get fresh references to hosts
+                try:
+                    src_host = self.hosts.get(f"h{src_num}")
+                    dst_host = self.hosts.get(f"h{dst_num}")
 
-            scaled_time_point = time_point / time_scale
-            time_to_wait = scaled_time_point - (time.time() - start_time)
+                    if (
+                        not src_host
+                        or not dst_host
+                        or not src_host.intf()
+                        or not dst_host.intf()
+                    ):
+                        continue  # Skip if hosts are not available
 
-            if time_to_wait > 0:
-                time.sleep(time_to_wait)
+                    scaled_time_point = time_point / time_scale
+                    time_to_wait = scaled_time_point - (time.time() - start_time)
 
-            current_hour = (time_point / 3600) % self.period_hours
-            if not self.is_resetting:
-                self.start_iperf_flow(src_host, dst_host, current_hour)
+                    if time_to_wait > 0:
+                        time.sleep(time_to_wait)
+
+                    current_hour = (time_point / 3600) % self.period_hours
+                    if not self.is_resetting:
+                        self.start_iperf_flow(src_host, dst_host, current_hour)
+                except Exception as e:
+                    info(f"*** Error in flow {src_num}->{dst_num}: {str(e)}\n")
+                    continue
+        except Exception as e:
+            info(f"*** Error in Poisson process thread: {str(e)}\n")
 
     def start_iperf_flow(self, src_host, dst_host, current_hour):
-        """
-        Start an iperf flow between source and destination hosts.
+        """Start an iperf flow between source and destination hosts."""
+        try:
+            if not src_host.intf() or not dst_host.intf():
+                return  # Skip if interfaces are not available
 
-        Args:
-            src_host: Source host
-            dst_host: Destination host
-            max_bw (str): Maximum bandwidth (e.g. "10M")
-            duration (int): Duration of the flow in seconds
-        """
-        port = random.randint(5000, 6000)
-        # Start iperf server on destination
-        dst_host.cmd(
-            f"iperf -s -u -p {port} -t {self.flow_duration+5} > /dev/null 2>&1 &"
-        )
+            port = random.randint(5000, 6000)
 
-        # Start iperf client on source with fixed bandwidth
-        bw = 10
-        bw_str = f"{bw}M"
-        src_host.cmd(
-            f"iperf -c {dst_host.IP()} -u -p {port} -t {self.flow_duration} -b {bw_str} > /dev/null 2>&1 &"
-        )
+            # Start iperf server on destination
+            dst_host.cmd(
+                f"iperf -s -u -p {port} -t {self.flow_duration+5} > /dev/null 2>&1 &"
+            )
 
-        info(
-            f"  Flow at {current_hour:.2f}h: {src_host.name} -> {dst_host.name} ({bw_str}, {self.flow_duration}s)\n"
-        )
-        return {
-            "src": src_host.name,
-            "dst": dst_host.name,
-            "bw": bw_str,
-            "duration": self.flow_duration,
-            "start_time": time.time(),
-        }
+            # Start iperf client on source with fixed bandwidth
+            bw = 10
+            bw_str = f"{bw}M"
+            src_host.cmd(
+                f"iperf -c {dst_host.IP()} -u -p {port} -t {self.flow_duration} -b {bw_str} > /dev/null 2>&1 &"
+            )
+
+            info(
+                f"  Flow at {current_hour:.2f}h: {src_host.name} -> {dst_host.name} ({bw_str}, {self.flow_duration}s)\n"
+            )
+        except Exception as e:
+            info(f"*** Error starting iperf flow: {str(e)}\n")
 
 
 if __name__ == "__main__":

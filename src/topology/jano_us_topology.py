@@ -205,8 +205,9 @@ class JanosUSTopology:
         self.flow_duration = args.flow_duration
         self.time_scale = args.time_scale
         self.is_resetting = False
-        self.create_network()
-        self.start_network()
+        self.is_started = False
+        # self.create_network()
+        # self.start_network()
 
     def __del__(self):
         """
@@ -308,9 +309,10 @@ class JanosUSTopology:
             Mininet: The newly created network
         """
         # Clean up existing network if it exists
-        if self.net:
+        self.is_resetting = True
+        
+        if self.net and self.is_started:
             info("*** Stopping any existing network\n")
-            self.is_resetting = True
             # reset flow tables
             for switch in self.net.switches:
                 switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
@@ -319,11 +321,17 @@ class JanosUSTopology:
                 host.cmd("killall iperf")
             self.net.stop()
 
+            # Kill all the threads
+            self.simulation_thread.join()
+
             # Clear references
             self.net = None
             self.switches = {}
             self.hosts = {}
             self.controllers = {}
+        else:
+            info("*** Starting network\n")
+            self.is_started = True
 
         # Create fresh network
         self.create_network()
@@ -331,6 +339,10 @@ class JanosUSTopology:
         # Start network
         self.start_network()
         self.is_resetting = False
+
+        # Start the simulation
+        self.simulation_thread = threading.Thread(target=self.run_simulation)
+        self.simulation_thread.start()
         return self.net
 
     def generate_poisson_with_fluctuation(self, base_rate, fluctuation_amplitude):
@@ -424,7 +436,7 @@ class JanosUSTopology:
         src_host = self.hosts[f"h{src_dst_pair[0]}"]
         dst_host = self.hosts[f"h{src_dst_pair[1]}"]
 
-        for time_point in sorted(time_points):
+        for  time_point in sorted(time_points):
             if time.time() >= end_time:
                 break
 

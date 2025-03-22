@@ -53,17 +53,10 @@ class JanosUSTopologyWrapper:
                     time.sleep(1)
                 print("Network reset complete")
 
-                # Get initial state
-                initial_state = self._get_network_state()
-                self.current_state = initial_state
-                self.start_time = time.time()
-
                 return (
                     jsonify(
                         {
                             "message": "Topology reset successful",
-                            "state": initial_state,
-                            "start_time": self.start_time,
                         }
                     ),
                     200,
@@ -76,9 +69,9 @@ class JanosUSTopologyWrapper:
         self.flask_thread = hub.spawn(self.run_flask)
 
         # start simulation
-        print("Starting simulation")
+        print("Waiting for the reset to be called before starting simulation")
         print(f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)")
-        self.topology.run_simulation()
+        # self.topology.run_simulation()
     
     def run_flask(self):
         """

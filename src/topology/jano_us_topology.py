@@ -46,6 +46,8 @@ class JanosUSTopology:
         self.switches = {}
         self.hosts = {}
         self.controllers = {}
+        self.simulation_thread = None
+        self.stop_simulation = False  # Add flag to control simulation
 
         # Define domains
         self.domain1 = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"]  # Green domain
@@ -310,7 +312,8 @@ class JanosUSTopology:
         """
         # Clean up existing network if it exists
         self.is_resetting = True
-        
+        self.stop_simulation = True  # Signal threads to stop
+
         if self.net and self.is_started:
             info("*** Stopping any existing network\n")
             # reset flow tables
@@ -321,8 +324,11 @@ class JanosUSTopology:
                 host.cmd("killall iperf")
             self.net.stop()
 
-            # Kill all the threads
-            self.simulation_thread.join()
+            # Wait for simulation thread to complete with timeout
+            if self.simulation_thread and self.simulation_thread.is_alive():
+                self.simulation_thread.join(timeout=5)  # Wait up to 5 seconds
+                if self.simulation_thread.is_alive():
+                    info("*** Warning: Had to force stop simulation thread\n")
 
             # Clear references
             self.net = None
@@ -339,9 +345,11 @@ class JanosUSTopology:
         # Start network
         self.start_network()
         self.is_resetting = False
+        self.stop_simulation = False  # Reset stop flag
 
         # Start the simulation
         self.simulation_thread = threading.Thread(target=self.run_simulation)
+        self.simulation_thread.daemon = True  # Make thread daemon
         self.simulation_thread.start()
         return self.net
 
@@ -387,8 +395,6 @@ class JanosUSTopology:
         info(
             f"*** Parameters: period_hours={self.period_hours}, total_hours={self.total_hours}\n"
         )
-        info("*** Waiting for 10 seconds before starting simulation\n")
-        time.sleep(10)
 
         # Generate event times for each src-dst pair
         info(f"Generating Poisson events for each src-dst pair...\n")
@@ -436,8 +442,9 @@ class JanosUSTopology:
         src_host = self.hosts[f"h{src_dst_pair[0]}"]
         dst_host = self.hosts[f"h{src_dst_pair[1]}"]
 
-        for  time_point in sorted(time_points):
-            if time.time() >= end_time:
+        for time_point in sorted(time_points):
+            # Check if we should stop
+            if self.stop_simulation or time.time() >= end_time:
                 break
 
             scaled_time_point = time_point / time_scale
@@ -448,9 +455,7 @@ class JanosUSTopology:
 
             current_hour = (time_point / 3600) % self.period_hours
             if not self.is_resetting:
-                self.start_iperf_flow(
-                    src_host, dst_host, current_hour
-                )
+                self.start_iperf_flow(src_host, dst_host, current_hour)
 
     def start_iperf_flow(self, src_host, dst_host, current_hour):
         """

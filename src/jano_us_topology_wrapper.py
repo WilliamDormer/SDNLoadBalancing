@@ -6,6 +6,7 @@ from ryu.lib import hub
 import argparse
 import numpy as np
 import time
+import threading  # Use threading instead of hub
 
 
 class JanosUSTopologyWrapper:
@@ -32,7 +33,7 @@ class JanosUSTopologyWrapper:
 
         # Initialize Flask app
         self.app = Flask(__name__)
-        self.flask_port = 9000
+        self.flask_port = 9000 # TODO move this to a config file
         # Initialize topology
         self.topology = JanosUSTopology(args)
 
@@ -45,6 +46,13 @@ class JanosUSTopologyWrapper:
         def reset_topology():
             """Handle reset requests and return initial state"""
             try:
+                # kill the thread running the simulation
+                if self.sim_thread and self.sim_thread.is_alive():
+                    self.sim_thread.stop()
+                    time.sleep(1)
+                    self.sim_thread.join() # wait for the thread to finish.
+                    print("thread has joined")
+
                 # Reset the topology
                 self.topology.reset()
 
@@ -52,6 +60,11 @@ class JanosUSTopologyWrapper:
                 while self.topology.is_resetting:
                     time.sleep(1)
                 print("Network reset complete")
+
+
+                # start the thread again. 
+                self.sim_thread = threading.Thread(target=self.run_simulation, daemon=True)
+                self.sim_thread.start()
 
                 # Get initial state
                 initial_state = self._get_network_state()
@@ -73,19 +86,32 @@ class JanosUSTopologyWrapper:
 
         # Start Flask server in a separate thread
         self.flask_port = 9000  # Different from global controller's port
-        self.flask_thread = hub.spawn(self.run_flask)
+        # self.flask_thread = hub.spawn(self.run_flask)
 
-        # start simulation
-        print("Starting simulation")
-        print(f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)")
-        self.topology.run_simulation()
+        #  # Start simulation in a separate thread
+        # self.sim_thread = hub.spawn(self.run_simulation)
+
+        # Start Flask server in a separate thread
+        self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
+        self.flask_thread.start()
+
+        # Start simulation in a separate thread
+        self.sim_thread = threading.Thread(target=self.run_simulation, daemon=True)
+        self.sim_thread.start()
     
     def run_flask(self):
         """
         Run the Flask server.
         """
-        self.app.run(host="0.0.0.0", port=self.flask_port)
-
+        print(f"Starting flask server on port: {self.flask_port}")
+        # self.app.run(host="0.0.0.0", port=self.flask_port)
+        self.app.run(host="127.0.0.1", port=self.flask_port)
+    
+    def run_simulation(self):
+        # start simulation
+        print("Starting simulation")
+        print(f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)")
+        self.topology.run_simulation()
 
 if __name__ == "__main__":
     # Parse command line arguments
@@ -103,6 +129,7 @@ if __name__ == "__main__":
 
     # Keep the main thread running
     try:
-        hub.sleep(float("inf"))
+        while True:  # Keep the main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\nShutting down topology wrapper...")

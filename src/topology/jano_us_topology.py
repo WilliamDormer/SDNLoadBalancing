@@ -20,7 +20,7 @@ import threading
 setLogLevel("info")  # Options: 'debug', 'info', 'warning', 'error', 'critical'
 
 
-class JanosUSTopology:
+class JanosUSTopology(threading.Thread):
     """
     A class that handles the Janos-US network topology creation and management
     for use with a Gym environment.
@@ -40,6 +40,11 @@ class JanosUSTopology:
             flow_duration (int): Duration of each iperf flow
             time_scale (float): Time scale for the simulation
         """
+
+        # for handling the stopping behaviour
+        super(JanosUSTopology, self).__init__()
+        self._stop_event = threading.Event()
+
         self.args = args
         self.controller_ip = args.global_controller_ip
         self.net = None
@@ -215,6 +220,13 @@ class JanosUSTopology:
         if self.net:
             self.net.stop()
         os.system("sudo mn -c")
+    
+    def stop(self):
+        '''
+        used by threading to indicate that the thread should terminate.
+        Useful for reset. 
+        '''
+        self._stop_event.set()
 
     def create_network(self):
         """
@@ -379,6 +391,7 @@ class JanosUSTopology:
         time.sleep(10)
 
         # Generate event times for each src-dst pair
+        #TODO add more comments explaining this process.
         info(f"Generating Poisson events for each src-dst pair...\n")
         time_points = {}
         for src, dst in self.src_dst_pairs:
@@ -407,6 +420,11 @@ class JanosUSTopology:
                 True  # Make threads daemon so they exit when main program exits
             )
 
+            if self._stop_event.is_set():
+                print("stopped called in simulation thread")
+                break
+
+
         # Start all threads
         for t in threads:
             t.start()
@@ -425,6 +443,9 @@ class JanosUSTopology:
         dst_host = self.hosts[f"h{src_dst_pair[1]}"]
 
         for time_point in sorted(time_points):
+            
+            # check if the external has ordered this to shut down.
+
             if time.time() >= end_time:
                 break
 
@@ -444,7 +465,7 @@ class JanosUSTopology:
         """
         Start an iperf flow between source and destination hosts.
 
-        Args:
+        Args: #TODO update this description to reflect the new parameters
             src_host: Source host
             dst_host: Destination host
             max_bw (str): Maximum bandwidth (e.g. "10M")

@@ -2,7 +2,6 @@
 
 from topology.jano_us_topology import JanosUSTopology
 from flask import Flask, jsonify, request
-from ryu.lib import hub
 import argparse
 import numpy as np
 import time
@@ -78,7 +77,7 @@ class JanosUSTopologyWrapper:
 
         # Start Flask server in a separate thread
         self.flask_port = 9000  # Different from global controller's port
-        self.flask_thread = hub.spawn(self.run_flask)
+        # self.flask_thread = hub.spawn(self.run_flask)
 
         print("Waiting for the reset to be called before starting simulation")
         print(
@@ -125,6 +124,7 @@ if __name__ == "__main__":
 
     # Keep the main thread running
     try:
-        hub.sleep(float("inf"))
+        while True:  # Keep the main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\nShutting down topology wrapper...")

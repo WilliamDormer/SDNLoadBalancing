@@ -20,7 +20,7 @@ import multiprocessing
 setLogLevel("info")  # Options: 'debug', 'info', 'warning', 'error', 'critical'
 
 
-class JanosUSTopology:
+class JanosUSTopology(threading.Thread):
     """
     A class that handles the Janos-US network topology creation and management
     for use with a Gym environment.
@@ -40,6 +40,11 @@ class JanosUSTopology:
             flow_duration (int): Duration of each iperf flow
             time_scale (float): Time scale for the simulation
         """
+
+        # for handling the stopping behaviour
+        super(JanosUSTopology, self).__init__()
+        self._stop_event = threading.Event()
+
         self.args = args
         self.controller_ip = args.global_controller_ip
         self.net = None
@@ -221,6 +226,13 @@ class JanosUSTopology:
         if self.net:
             self.net.stop()
         os.system("sudo mn -c")
+    
+    def stop(self):
+        '''
+        used by threading to indicate that the thread should terminate.
+        Useful for reset. 
+        '''
+        self._stop_event.set()
 
     def create_network(self):
         """

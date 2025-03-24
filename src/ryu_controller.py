@@ -66,6 +66,11 @@ class DomainController(app_manager.RyuApp):
                     default="",
                     help=("Unique identifier for this controller"),
                 ),
+                cfg.IntOpt(
+                    "hard_timeout",
+                    default=15,
+                    help=("The hard_timeout time for new flow rules in the switches for missing flow rules, important to prevent the network from fully stabilizing and generating no controller signals"),
+                )
             ]
         )
 
@@ -80,6 +85,9 @@ class DomainController(app_manager.RyuApp):
 
         # Read the argument value
         self.total_switches = self.CONF.total_switches
+
+        # set the flow entry timeout.
+        self.hard_timeout = self.CONF.hard_timeout
 
         # State tracking components
         self.datapaths = {}  # Store active datapaths
@@ -233,21 +241,28 @@ class DomainController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # install the table-miss flow entry.
+        # install the table-miss flow entry.S
         match = parser.OFPMatch()
         actions = [
             parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)
         ]
         self.add_flow(datapath, 0, match, actions)
 
-    def add_flow(self, datapath, priority, match, actions):
+    def add_flow(self, datapath, priority, match, actions, hard_timeout=0):
+        '''
+        hard_timeout : forces the flow to timeout after a given time.
+        '''
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
         # construct flow_mod message and send it.
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
-            datapath=datapath, priority=priority, match=match, instructions=inst
+            datapath=datapath, 
+            priority=priority, 
+            match=match, 
+            instructions=inst,
+            hard_timeout = hard_timeout
         )
         datapath.send_msg(mod)
 
@@ -293,7 +308,7 @@ class DomainController(app_manager.RyuApp):
         # install a flow to avoid packet_in next time.
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            self.add_flow(datapath, 1, match, actions)
+            self.add_flow(datapath, 1, match, actions, hard_timeout=self.hard_timeout)
 
         # construct packet_out message and send it.
         out = parser.OFPPacketOut(

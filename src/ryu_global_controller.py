@@ -7,10 +7,13 @@ from ryu import cfg
 from flask import Flask, request, jsonify
 import urllib.request
 import urllib.error
-import json
+import requests
+import json 
 import subprocess
 import numpy as np
 import time
+import sys
+import logging
 
 
 class GlobalController(app_manager.RyuApp):
@@ -44,10 +47,26 @@ class GlobalController(app_manager.RyuApp):
                         "A list of capacities for each controller (ordered by IP then port)"
                     ),
                 ),
+                cfg.StrOpt(
+                    "network_wrapper_ip",
+                    default = None,
+                    help=(
+                        "IP address of the network wrapper "
+                    ),
+                ),
+                cfg.StrOpt(
+                    "network_wrapper_port",
+                    default = None,
+                    help=(
+                        "Port of the network wrapper"
+                    ),
+                )
             ]
         )
 
         # TODO add a dynamic way to get this:
+
+        # stores the switches that are controlled by each of the controllers.
         self.switches_by_controller = [
             [0],  # first controller's switches (owns switch 1)
             [1],  # second controller's switches (owns switch 2)
@@ -73,6 +92,11 @@ class GlobalController(app_manager.RyuApp):
         self.state_matrix = np.zeros(
             (self.m, self.n)
         )  # m x n matrix, where m is the number of controllers, and n is the number of switches
+
+        self.logger = logging.getLogger(__name__)
+
+        # TODO set this to false, putting true for debug.
+        self.network_up = True # this flag indicates whether the network is ready. It's intended to prevent polling and getting empty state vectors.
 
         # set up flask server that will handle the registration of the domain controllers
         self.app = Flask(__name__)
@@ -106,7 +130,7 @@ class GlobalController(app_manager.RyuApp):
                 )
 
                 # sorting the domain controllers, so that the order is constant, (important for building state vector)
-                # Sort the domain controllers by IP and then by port
+                # Sort the domain controllfers by IP and then by port
                 self.domain_controllers.sort(key=lambda x: (x["ip"], x["port"]))
                 print("updated domain controllers: ", self.domain_controllers)
 
@@ -129,6 +153,10 @@ class GlobalController(app_manager.RyuApp):
             controller_id: the index of the controller migrated to (sorted by IP, then PORT)
             switch_id: the switch that is being migrated to that controller.
             """
+
+            if self.network_up == False:
+                return (jsonify({"error:": "Network was not up when migrate was called"}), 403)
+
             try:
                 # parse the incoming json data
                 data = request.get_json()
@@ -147,12 +175,22 @@ class GlobalController(app_manager.RyuApp):
                         jsonify({"error": "missing required fields"}),
                         400,
                     )  # Bad Request if missing required field
-
+                
+                # "target_controller" and "switch" are indexed starting at 1. 
+                
+                # check if the migration is a non-migration action (aka the controller already controls the switch. )
+                if data["switch"] in self.switches_by_controller[data["target_controller"]-1]:
+                    self.logger.info("Non-migration action called")
+                    return "", 200
+                
                 # execute the migration command
 
+                self.logger.info(f"Received migrate request for\ntarget_controller: {data['target_controller']}\nswitch: {data['switch']}")
+
                 # get the current controller ip
-                ip = self.domain_controllers[data["target_controller"]]["ip"]
-                port = self.domain_controllers[data["target_controller"]]["port"]
+                ip = self.domain_controllers[data["target_controller"]-1]["ip"]
+                port = int(self.domain_controllers[data["target_controller"]-1]["port"]) - 500 # this is the flask port, not the controller ryu port. 
+                # we can subtract by 500 to get the correct port. 
                 subprocess.Popen(
                     f'sudo ovs-vsctl set-controller s{data["switch"]} tcp:{ip}:{port}',
                     shell=True,
@@ -173,7 +211,13 @@ class GlobalController(app_manager.RyuApp):
             This function reports the state.
             It is intended to be called by the pytorch code via http
             """
+
+            if self.network_up == False:
+                return (jsonify({"error:": "Network was not up when get_state was called"}), 403)
+
             try:
+                # collect the up to date state matrix.
+                self.poll_domain_controllers_once()
                 data = jsonify({"state": self.state_matrix.tolist()})
                 # Return a success response with a 201 status code (Created) if successful
                 return data, 200
@@ -213,7 +257,9 @@ class GlobalController(app_manager.RyuApp):
             print("reporting switch configuration to deep learning system")
             try:
                 # TODO update the state matrix first, instead of polling regularly.
+                print(f"reporting switch configuration to deep learning system: \n{self.switches_by_controller}")
                 data = jsonify({"data": self.switches_by_controller})
+                # data = jsonify({"data": self.controller_switch_mapping})
 
                 # Return a success response with a 201 status code (Created) if successful
                 return data, 200
@@ -248,15 +294,6 @@ class GlobalController(app_manager.RyuApp):
                         f"Reset topology failed with status {response.getcode()}: {response_data}"
                     )
 
-                # Reset the state matrix
-                self.state_matrix = np.zeros((self.m, self.n))
-
-                # Reset switches to their default configuration
-                self.switches_by_controller = [
-                    [0],  # first controller's switches
-                    [1],  # second controller's switches
-                ]
-
                 return "", 200
             except Exception as e:
                 print(f"Reset failed with error: {str(e)}")
@@ -272,10 +309,10 @@ class GlobalController(app_manager.RyuApp):
 
         # now that we have registered the controllers, we can begin polling for network traffic information.
 
-        # Polling interval in seconds
-        self.poll_interval = 1
-        # Periodic polling using greenlet
-        self.poll_thread = hub.spawn(self.poll_domain_controllers)
+        # # Polling interval in seconds
+        # self.poll_interval = 1
+        # # Periodic polling using greenlet
+        # self.poll_thread = hub.spawn(self.poll_domain_controllers)
 
     def run_flask(self):
         self.app.run(host="0.0.0.0", port=self.flask_port)
@@ -297,6 +334,7 @@ class GlobalController(app_manager.RyuApp):
                 if controller_state:
                     # Extract packet-in rates from the controller state
                     packet_in_rates = controller_state.get("packet_in_rates", {})
+                    #TODO if you use this function again, you need to match it to the one below.
 
                     # Convert to state vector
                     state_vector = [0] * self.n
@@ -317,6 +355,66 @@ class GlobalController(app_manager.RyuApp):
             print("state_matrix: ", self.state_matrix)
 
             hub.sleep(self.poll_interval)
+        
+    def convert_controller_switch_mapping(self, controller_switch_mapping):
+        '''
+        takes in a controller switch mapping object from the domain controller
+        and turns it into a format resembling an entry of the switches_by_controller table
+        '''
+        # {'20': 'controller-6657', '21': 'controller-6657', '23': 'controller-6657', '24': 'controller-6657', '25': 'controller-6657', '26': 'controller-6657'}}
+        entry = [int(key) for key in controller_switch_mapping.keys()]
+        return entry
+
+    def poll_domain_controllers_once(self):
+        """
+        Polls the domain controllers for their state and saves it.
+        """
+        
+        # # Reset state matrix
+        # self.state_matrix = np.zeros((self.m, self.n))
+
+        # Poll each controller for its state
+        # self.logger.info("Polling domain controllers (once)")
+
+        try: 
+            new_switches_by_controller = []
+
+            for i, controller in enumerate(self.domain_controllers):
+                controller_state = self._get_controller_state(
+                    controller["ip"], controller["port"]
+                )
+
+                if controller_state:
+                    # Extract packet-in rates from the controller state
+                    packet_in_rates = controller_state.get("packet_in_rates", {})
+                    controller_switch_mapping = controller_state.get("controller_switch_mapping", {})
+                    # self.logger.info(f"controller_switch_mapping: {controller_switch_mapping}")
+                    # convert this into the format that we can store
+                    entry = self.convert_controller_switch_mapping(controller_switch_mapping)
+                    # self.logger.info(f"new entry to switches_by_controller: {entry}")
+                    new_switches_by_controller.append(entry)
+
+                    # Convert to state vector
+                    state_vector = [0] * self.n
+                    for switch_id_str, rate in packet_in_rates.items():
+                        try:
+                            # Convert string switch ID to integer and adjust for 0-indexing
+                            switch_idx = int(switch_id_str) - 1
+                            if 0 <= switch_idx < self.n:
+                                state_vector[switch_idx] = rate
+                        except (ValueError, IndexError):
+                            self.logger.error(f"Invalid switch ID: {switch_id_str}")
+
+                    # Update state matrix
+                    self.state_matrix[i, :] = state_vector
+            
+            self.logger.info(f"new value for switches_by_controller: {new_switches_by_controller}")
+            self.switches_by_controller = new_switches_by_controller
+        except Exception as e:
+            self.logger.info("Exception in polling domain controllers: ", e)
+
+        # Combine the results from the domain controllers into a single state vector
+        # size m x n where m is the number of domain controllers, n is the number of switches.
 
     def _get_controller_state(self, ip, port):
         """

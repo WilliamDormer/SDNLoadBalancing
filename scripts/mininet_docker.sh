@@ -101,7 +101,6 @@ else
     -v ${XAUTHORITY:-~/.Xauthority}:/root/.Xauthority:rw \
     -v /lib/modules:/lib/modules \
     -v $(pwd):/root/SDNLoadBalancing \
-    --network host \
     -p 6633:6633 \
     -p 6653:6653 \
     -p 6654:6654 \
@@ -109,6 +108,7 @@ else
     -p 6656:6656 \
     -p 6657:6657 \
     -p 6640:6640 \
+    -p 9000:9000 \
     --restart unless-stopped \
     -it $IMAGE_NAME
 fi

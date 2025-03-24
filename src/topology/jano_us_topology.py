@@ -14,7 +14,7 @@ from mininet.node import RemoteController
 from mininet.link import TCLink
 from mininet.log import info, setLogLevel
 import math
-import threading
+import multiprocessing
 
 # At the beginning of your main code
 setLogLevel("info")  # Options: 'debug', 'info', 'warning', 'error', 'critical'
@@ -46,8 +46,12 @@ class JanosUSTopology:
         self.switches = {}
         self.hosts = {}
         self.controllers = {}
-        self.simulation_thread = None
-        self.stop_simulation = False  # Add flag to control simulation
+        self.simulation_process = None  # Replace thread with process
+        self.stop_simulation = multiprocessing.Value(
+            "b", False
+        )  # Shared value for process control
+        self.is_resetting = multiprocessing.Value("b", False)
+        self.processes = []  # List to keep track of all processes
 
         # Define domains
         self.domain1 = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"]  # Green domain
@@ -206,7 +210,6 @@ class JanosUSTopology:
         self.total_hours = args.total_hours
         self.flow_duration = args.flow_duration
         self.time_scale = args.time_scale
-        self.is_resetting = False
         self.is_started = False
         # self.create_network()
         # self.start_network()
@@ -307,9 +310,9 @@ class JanosUSTopology:
         """
         Reset the network by stopping any existing one and creating a fresh topology.
         """
-        # Clean up existing network if it exists
-        self.is_resetting = True
-        self.stop_simulation = True  # Signal threads to stop
+        # Set flags to stop processes
+        self.is_resetting.value = True
+        self.stop_simulation.value = True
 
         if self.net and self.is_started:
             info("*** Stopping any existing network\n")
@@ -317,15 +320,16 @@ class JanosUSTopology:
             for host in self.net.hosts:
                 host.cmd("killall -9 iperf")
 
-            info("*** Terminating all threads\n")
+            info("*** Terminating all processes\n")
+            # Terminate all processes
+            for p in self.processes:
+                if p.is_alive():
+                    p.terminate()
+                    p.join()
 
-            for t in self.threads:
-                t.join()
-            self.simulation_thread.join()
+            info("*** All processes terminated\n")
 
-            info("*** All threads terminated\n")
-
-            # reset flow tables and stop network
+            # Reset flow tables and stop network
             for switch in self.net.switches:
                 switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
             self.net.stop()
@@ -342,16 +346,50 @@ class JanosUSTopology:
 
         # Create fresh network
         self.create_network()
-
-        # Start network
         self.start_network()
-        self.is_resetting = False
-        self.stop_simulation = False  # Reset stop flag
 
-        # Start the simulation
-        self.simulation_thread = threading.Thread(target=self.run_simulation)
-        self.simulation_thread.daemon = True
-        self.simulation_thread.start()
+        # Reset flags
+        self.is_resetting.value = False
+        self.stop_simulation.value = False
+
+        # Prepare simulation processes
+        info("*** Preparing traffic simulation\n")
+        info(
+            f"*** Parameters: period_hours={self.period_hours}, total_hours={self.total_hours}\n"
+        )
+
+        # Generate time points
+        time_points = {}
+        for src, dst in self.src_dst_pairs:
+            base_rate = self.base_rates[src - 1]
+            fluctuation_amplitude = self.fluctuation_amplitudes[src - 1]
+            time_points[(src, dst)] = self.generate_poisson_with_fluctuation(
+                base_rate, fluctuation_amplitude
+            )
+        start_time = time.time()
+
+        # Create processes for each src-dst pair
+        self.processes = []
+        for src_dst_pair, points in time_points.items():
+            process = multiprocessing.Process(
+                target=self.run_poisson_process,
+                args=(
+                    src_dst_pair,
+                    points.copy(),
+                    self.total_hours * 3600,
+                    self.time_scale,
+                    start_time,
+                    self.stop_simulation,
+                    self.is_resetting,
+                ),
+            )
+            process.daemon = True
+            self.processes.append(process)
+
+        # Start all processes non-blocking
+        for p in self.processes:
+            p.start()
+
         return self.net
 
     def generate_poisson_with_fluctuation(self, base_rate, fluctuation_amplitude):
@@ -390,52 +428,15 @@ class JanosUSTopology:
 
         return np.array(time_points)
 
-    def run_simulation(self):
-        """Run the traffic simulation with the specified parameters."""
-        info("*** Starting traffic simulation\n")
-        info(
-            f"*** Parameters: period_hours={self.period_hours}, total_hours={self.total_hours}\n"
-        )
-
-        # Generate event times for each src-dst pair
-        info(f"*** Generating Poisson events for each src-dst pair...\n")
-        time_points = {}
-        for src, dst in self.src_dst_pairs:
-            base_rate = self.base_rates[src - 1]
-            fluctuation_amplitude = self.fluctuation_amplitudes[src - 1]
-            time_points[(src, dst)] = self.generate_poisson_with_fluctuation(
-                base_rate, fluctuation_amplitude
-            )
-        start_time = time.time()
-
-        # Run the Poisson process for each src-dst pair
-        self.threads = []
-        for src_dst_pair, points in time_points.items():
-            thread = threading.Thread(
-                target=self.run_poisson_process,
-                args=(
-                    src_dst_pair,
-                    points.copy(),
-                    self.total_hours * 3600,
-                    self.time_scale,
-                    start_time,
-                ),
-            )
-            self.threads.append(thread)
-            thread.daemon = (
-                True  # Make threads daemon so they exit when main program exits
-            )
-
-        # Start all threads
-        for t in self.threads:
-            t.start()
-
-        # Wait for all threads to complete
-        for t in self.threads:
-            t.join()
-
     def run_poisson_process(
-        self, src_dst_pair, time_points, duration, time_scale, start_time
+        self,
+        src_dst_pair,
+        time_points,
+        duration,
+        time_scale,
+        start_time,
+        stop_flag,
+        reset_flag,
     ):
         """Run the Poisson process for a given src-dst pair."""
         try:
@@ -444,7 +445,7 @@ class JanosUSTopology:
 
             for time_point in sorted(time_points):
                 # Check if we should stop
-                if self.stop_simulation or time.time() >= end_time:
+                if stop_flag.value or time.time() >= end_time:
                     break
 
                 # Get fresh references to hosts
@@ -458,7 +459,7 @@ class JanosUSTopology:
                         or not src_host.intf()
                         or not dst_host.intf()
                     ):
-                        continue  # Skip if hosts are not available
+                        continue
 
                     scaled_time_point = time_point / time_scale
                     time_to_wait = scaled_time_point - (time.time() - start_time)
@@ -467,13 +468,13 @@ class JanosUSTopology:
                         time.sleep(time_to_wait)
 
                     current_hour = (time_point / 3600) % self.period_hours
-                    if not self.is_resetting:
+                    if not reset_flag.value:
                         self.start_iperf_flow(src_host, dst_host, current_hour)
                 except Exception as e:
                     info(f"*** Error in flow {src_num}->{dst_num}: {str(e)}\n")
                     continue
         except Exception as e:
-            info(f"*** Error in Poisson process thread: {str(e)}\n")
+            info(f"*** Error in Poisson process: {str(e)}\n")
 
     def start_iperf_flow(self, src_host, dst_host, current_hour):
         """Start an iperf flow between source and destination hosts."""

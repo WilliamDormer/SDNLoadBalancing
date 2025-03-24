@@ -10,6 +10,7 @@ import urllib.error
 import json
 import subprocess
 import numpy as np
+import time
 
 
 class GlobalController(app_manager.RyuApp):
@@ -222,20 +223,44 @@ class GlobalController(app_manager.RyuApp):
                     jsonify({"error": f"Internal server error: {str(e)}"}),
                     500,
                 )  # Internal Server Error on exceptions
-        
+
         @self.app.route("/reset", methods=["POST"])
         def reset():
             """
-            This function resets the network.
+            This function resets the network synchronously.
             """
             print("resetting the network")
             try:
-                # reset the network 
-                req = urllib.request.Request("http://localhost:9000/reset_topology")
-                urllib.request.urlopen(req)
+                # Make a synchronous request to reset topology
+                req = urllib.request.Request(
+                    "http://localhost:9000/reset_topology",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=b"{}",
+                )
+
+                # Wait for the complete reset
+                response = urllib.request.urlopen(req, timeout=30)
+                response_data = response.read().decode("utf-8")
+
+                if response.getcode() != 200:
+                    raise Exception(
+                        f"Reset topology failed with status {response.getcode()}: {response_data}"
+                    )
+
+                # Reset the state matrix
+                self.state_matrix = np.zeros((self.m, self.n))
+
+                # Reset switches to their default configuration
+                self.switches_by_controller = [
+                    [0],  # first controller's switches
+                    [1],  # second controller's switches
+                ]
+
                 return "", 200
             except Exception as e:
-                return (jsonify({"error": f"Internal server error: {str(e)}"}), 500)
+                print(f"Reset failed with error: {str(e)}")
+                return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
         # # testing the switch migration code
         # hub.sleep(1)
@@ -292,7 +317,6 @@ class GlobalController(app_manager.RyuApp):
             print("state_matrix: ", self.state_matrix)
 
             hub.sleep(self.poll_interval)
-
 
     def _get_controller_state(self, ip, port):
         """

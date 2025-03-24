@@ -6,7 +6,7 @@ from ryu.lib import hub
 import argparse
 import numpy as np
 import time
-
+import threading
 
 class JanosUSTopologyWrapper:
     """
@@ -33,8 +33,11 @@ class JanosUSTopologyWrapper:
         # Initialize Flask app
         self.app = Flask(__name__)
         self.flask_port = 9000
+
         # Initialize topology
         self.topology = JanosUSTopology(args)
+        self.reset_complete = False
+        self.reset_error = None
 
         # Track current state
         self.current_state = np.zeros((self.num_domains, self.num_switches))
@@ -43,41 +46,67 @@ class JanosUSTopologyWrapper:
         # Register routes
         @self.app.route("/reset_topology", methods=["POST"])
         def reset_topology():
-            """Handle reset requests and return initial state"""
+            """Handle reset requests synchronously"""
+            print("Received reset request")
             try:
-                # Reset the topology
-                self.topology.reset()
+                # Reset the flags
+                self.reset_complete = False
+                self.reset_error = None
 
-                # Wait for network to stabilize
-                while self.topology.is_resetting:
-                    time.sleep(1)
+                # Start the reset in a separate thread
+                thread = threading.Thread(target=self._do_reset)
+                thread.start()
+
+                # Wait for reset with timeout
+                start_time = time.time()
+                timeout = 30  # seconds
+
+                while not self.reset_complete and time.time() - start_time < timeout:
+                    time.sleep(0.1)
+                    if self.reset_error:
+                        raise Exception(self.reset_error)
+
+                if not self.reset_complete:
+                    raise Exception("Reset operation timed out")
+
                 print("Network reset complete")
-
-                return (
-                    jsonify(
-                        {
-                            "message": "Topology reset successful",
-                        }
-                    ),
-                    200,
-                )
+                thread.join()
+                return jsonify({"message": "Topology reset successful"}), 200
             except Exception as e:
+                print(f"Reset failed with error: {str(e)}")
                 return jsonify({"error": f"Reset failed: {str(e)}"}), 500
 
         # Start Flask server in a separate thread
         self.flask_port = 9000  # Different from global controller's port
         self.flask_thread = hub.spawn(self.run_flask)
 
-        # start simulation
         print("Waiting for the reset to be called before starting simulation")
-        print(f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)")
-        # self.topology.run_simulation()
-    
+        print(
+            f"Time scaling factor: {self.topology.time_scale} x (1 day in {24*60/self.topology.time_scale:.1f} minutes)"
+        )
+
+    def _do_reset(self):
+        """Execute reset operation in a separate thread"""
+        try:
+            # Perform reset
+            print("Resetting topology")
+            self.topology.reset()
+
+            # Wait for reset to complete
+            while self.topology.is_resetting.value:
+                time.sleep(0.1)
+            # Mark reset as complete
+            self.reset_complete = True
+        except Exception as e:
+            self.reset_error = str(e)
+            self.reset_complete = True  # Mark as complete even on error
+
     def run_flask(self):
         """
         Run the Flask server.
         """
-        self.app.run(host="0.0.0.0", port=self.flask_port)
+        print(f"Starting Flask server on port {self.flask_port}...")
+        self.app.run(host="0.0.0.0", port=self.flask_port, debug=False)
 
 
 if __name__ == "__main__":
@@ -87,7 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--total_hours", type=float, default=24.0)
     parser.add_argument("--global_controller_ip", type=str, default="192.168.2.33")
     parser.add_argument("--global_controller_port", type=int, default=8000)
-    parser.add_argument("--flow_duration", type=int, default=10)
+    parser.add_argument("--flow_duration", type=int, default=2)
     parser.add_argument("--time_scale", type=float, default=60.0)
     args = parser.parse_args()
 

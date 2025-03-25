@@ -69,8 +69,10 @@ class DomainController(app_manager.RyuApp):
                 cfg.IntOpt(
                     "hard_timeout",
                     default=15,
-                    help=("The hard_timeout time for new flow rules in the switches for missing flow rules, important to prevent the network from fully stabilizing and generating no controller signals"),
-                )
+                    help=(
+                        "The hard_timeout time for new flow rules in the switches for missing flow rules, important to prevent the network from fully stabilizing and generating no controller signals"
+                    ),
+                ),
             ]
         )
 
@@ -134,7 +136,6 @@ class DomainController(app_manager.RyuApp):
 
         # Register with global controller
         self.register_with_global_controller()
-
 
     def run_flask(self):
         """
@@ -249,20 +250,19 @@ class DomainController(app_manager.RyuApp):
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, hard_timeout=0):
-        '''
+        """
         hard_timeout : forces the flow to timeout after a given time.
-        '''
+        """
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
         # construct flow_mod message and send it.
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
-            datapath=datapath, 
-            priority=priority, 
-            match=match, 
+            datapath=datapath,
+            priority=priority,
+            match=match,
             instructions=inst,
-            hard_timeout = hard_timeout
         )
         datapath.send_msg(mod)
 
@@ -286,29 +286,15 @@ class DomainController(app_manager.RyuApp):
         # get the received port number from packet_in message.
         in_port = msg.match["in_port"]
 
-        # self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
-
         # update in_flows
         if dpid <= self.total_switches:
             self.in_flows[dpid - 1] += 1
 
-        # learn a mac address to avoid FLOOD next time.
-        self.mac_to_port[dpid][src] = in_port
-
-        # if the destination mac address is already learned,
-        # decide which port to output the packet, otherwise FLOOD.
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
-        else:
-            out_port = ofproto.OFPP_FLOOD
+        # Always flood packets
+        out_port = ofproto.OFPP_FLOOD
 
         # construct action list.
         actions = [parser.OFPActionOutput(out_port)]
-
-        # install a flow to avoid packet_in next time.
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            self.add_flow(datapath, 1, match, actions, hard_timeout=self.hard_timeout)
 
         # construct packet_out message and send it.
         out = parser.OFPPacketOut(

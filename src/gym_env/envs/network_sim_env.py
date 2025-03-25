@@ -181,35 +181,49 @@ class NetworkSimEnv(gym.Env):
         """
 
         # compute the migration action that was selected.
-        e = int(action % self.n)
-        w = int(np.ceil(action / self.n))
+        # Since action space starts at 1, subtract 1 first
+        action = action - 1
+        # Now calculate switch (e) and controller (w)
+        e = int((action % self.n) + 1)  # switch number (1-based)
+        w = int(action // self.n + 1)  # controller number (1-based)
 
         # send the migration action to the global controller.
-
-        # the action space starts at 1, so it will be the controller id for target_controller.
-        data = {"target_controller": w, "switch": e}  # range 1 to m  # range 1 to n
-
-        # changing it to the format that step expects in the wrapper
-        # data = {
-        #     "action" : [w, e]
-        # }
+        data = {"target_controller": w, "switch": e}
 
         print(f"migrate request data: {data}")
+        # print(
+        #     f"Current switch configuration before migration: {self.switches_by_controller}"
+        # )
 
-        response = requests.post(self.gc_base_url + "migrate", json=data)
-        if response.status_code != 200:
-            raise Exception(
-                "Failed to execute migration action with global controller."
-            )
+        try:
+            response = requests.post(self.gc_base_url + "migrate", json=data)
+            # print(f"Migration response status code: {response.status_code}")
+            # print(f"Migration response content: {response.text}")
 
-        # wait some time to allow the network to adjust to the change
-        time.sleep(self.step_time)
+            if response.status_code != 200:
+                raise Exception(
+                    f"Failed to execute migration action. Status: {response.status_code}, Response: {response.text}"
+                )
 
-        # get the updated migrated switch positions:
-        self.switches_by_controller = self._get_switches_by_controller()
+            # Check if the switch actually moved
+            old_config = self.switches_by_controller
+            # wait some time to allow the network to adjust to the change
+            time.sleep(self.step_time)
+            # get the updated migrated switch positions:
+            self.switches_by_controller = self._get_switches_by_controller()
+            # print(
+            #     f"Switch configuration after migration: {self.switches_by_controller}"
+            # )
+
+        except requests.exceptions.RequestException as e:
+            print(f"Network error during migration: {e}")
+            raise e
+        except Exception as e:
+            print(f"Error during migration: {e}")
+            raise e
+
         # get the observation
         observation = self._get_obs()
-
         # compute the reward
 
         # compute the load ratio for each one (the steps below here would actually take place in the deep learning training loop.)

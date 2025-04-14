@@ -17,18 +17,27 @@ echo "Project directory: $PROJECT_DIR"
 # # Activate the virtual environment
 # source venv/bin/activate
 
+CONFIG_FILE="src/ryu_config_files/janos_us.conf"
+
 # Function to run a controller in the background
 run_controller() {
     local name=$1
     local port=$2
     echo "Starting controller $name on port $port..."
-    ryu-manager --ofp-tcp-listen-port=$port "$PROJECT_DIR/src/ryu_controller.py" > "logs/$name.log" 2>&1 &
+    ryu-manager --ofp-tcp-listen-port=$port --config-file="$CONFIG_FILE" "$PROJECT_DIR/src/ryu_controller.py" > "logs/$name.log" 2>&1 &
     sleep 1  # Give it a moment to start
     echo "Controller $name started with PID $!"
 }
 
+run_global_controller() {
+    echo "Starting global controller on port 6653..."
+    ryu-manager --ofp-tcp-listen-port=6653 --config-file="$CONFIG_FILE" "$PROJECT_DIR/src/ryu_global_controller.py" > "logs/g0.log" 2>&1 &
+    sleep 1  # Give it a moment to start
+    echo "Global controller started with PID $!"
+}
+
 # Start the global controller (g0)
-run_controller "g0" 6653
+run_global_controller
 
 # Start the domain controllers (c1-c4)
 run_controller "c1" 6654
@@ -43,5 +52,4 @@ echo "To stop all controllers, run: pkill -f ryu-manager"
 echo "Waiting for controllers to initialize..."
 sleep 5
 
-echo "Controllers are ready. You can now run the Janos US topology with:"
-echo "python janos_us_topology.py" 
+echo "Controllers are ready. You can now run the Janos US topology"

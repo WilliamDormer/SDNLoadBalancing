@@ -314,6 +314,33 @@ class GlobalController(app_manager.RyuApp):
                 print(f"Reset failed with error: {str(e)}")
                 return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+        @self.app.route("/stop", methods=["POST"])
+        def stop_controller():
+            """
+            Handle stop request to cleanly shut down the global controller
+            """
+            try:
+                # Set network_up flag to false to prevent further operations
+                self.network_up = False
+
+                req = urllib.request.Request(
+                    "http://localhost:9000/stop_topology",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=b"{}",
+                )
+                response = urllib.request.urlopen(req, timeout=30)
+                response_data = response.read().decode("utf-8")
+
+                if response.getcode() != 200:
+                    raise Exception(
+                        f"Stop topology failed with status {response.getcode()}: {response_data}"
+                    )
+
+                return "", 200
+            except Exception as e:
+                return jsonify({"error": f"Failed to stop controller: {str(e)}"}), 500
+
         # # testing the switch migration code
         # hub.sleep(1)
         # subprocess.Popen(f'sudo ovs-vsctl set-controller s1 tcp:127.0.0.1:6654', shell=True)

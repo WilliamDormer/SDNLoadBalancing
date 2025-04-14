@@ -286,15 +286,29 @@ class DomainController(app_manager.RyuApp):
         # get the received port number from packet_in message.
         in_port = msg.match["in_port"]
 
+        # self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
+
         # update in_flows
         if dpid <= self.total_switches:
             self.in_flows[dpid - 1] += 1
 
-        # Always flood packets
-        out_port = ofproto.OFPP_FLOOD
+        # learn a mac address to avoid FLOOD next time.
+        self.mac_to_port[dpid][src] = in_port
+
+        # if the destination mac address is already learned,
+        # decide which port to output the packet, otherwise FLOOD.
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
 
         # construct action list.
         actions = [parser.OFPActionOutput(out_port)]
+
+        # install a flow to avoid packet_in next time.
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+            self.add_flow(datapath, 1, match, actions)
 
         # construct packet_out message and send it.
         out = parser.OFPPacketOut(

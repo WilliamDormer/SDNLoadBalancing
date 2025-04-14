@@ -54,6 +54,8 @@ class JanosUSTopologyWrapper:
         self.current_state = np.zeros((self.num_domains, self.num_switches))
         self.start_time = time.time()
 
+        self.stop_topology = False
+
         # Register routes
         @self.app.route("/reset_topology", methods=["POST"])
         def reset_topology():
@@ -139,6 +141,22 @@ class JanosUSTopologyWrapper:
                 logger.info("=" * 50)
                 return jsonify({"error": f"Migration failed: {str(e)}"}), 500
 
+        @self.app.route("/stop_topology", methods=["POST"])
+        def stop_topology():
+            """Handle topology stop request"""
+            try:
+                logger.info("Received stop request")
+
+                # Stop the topology
+                if hasattr(self, "topology"):
+                    # Clean up topology resources
+                    # self.topology.stop()
+                    self.stop_topology = True
+                return jsonify({"message": "Topology stopped successfully"}), 200
+            except Exception as e:
+                logger.error(f"Failed to stop topology: {str(e)}")
+                return jsonify({"error": f"Failed to stop topology: {str(e)}"}), 500
+
         # Start Flask server in a separate thread
         self.flask_port = 9000  # Different from global controller's port
 
@@ -180,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--global_controller_ip", type=str, default="192.168.2.33")
     parser.add_argument("--global_controller_port", type=int, default=8000)
     parser.add_argument("--flow_duration", type=int, default=2)
-    parser.add_argument("--time_scale", type=float, default=30.0)
+    parser.add_argument("--time_scale", type=float, default=10.0)
     args = parser.parse_args()
 
     # Log startup information
@@ -191,5 +209,7 @@ if __name__ == "__main__":
     try:
         while True:  # Keep the main thread alive
             time.sleep(1)
+            if wrapper.stop_topology:
+                break
     except KeyboardInterrupt:
         logger.info("Shutting down topology wrapper...")

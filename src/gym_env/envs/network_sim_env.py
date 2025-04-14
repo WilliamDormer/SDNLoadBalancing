@@ -9,7 +9,7 @@ import pygame
 class NetworkSimEnv(gym.Env):
     # Human render mode will show what controllers the switches belong to in real time.
     # None will simply run with no GUI.
-    metadata = {"render_modes": ["human"], "render_fps": 4}
+    metadata = {"render_modes": ["human", "no"], "render_fps": 4}
 
     def __init__(
         self,
@@ -74,6 +74,12 @@ class NetworkSimEnv(gym.Env):
         self.window = None
         self.clock = None
 
+        # Add tracking for historical loads
+        self.historical_loads = []
+
+        # Initialize accumulated loads for each controller
+        self.controller_accumulated_loads = np.zeros(self.m)
+
     def _get_switches_by_controller(self):
         """
         function that polls the global controller for the switch configuration. Should be called at initialization, then on a migrate action.
@@ -87,7 +93,7 @@ class NetworkSimEnv(gym.Env):
                 json_data = response.json()  # Convert response to a dictionary
 
                 # update self.switches_by_controller
-                print("switches_by_controller: ", json_data)
+                # print("switches_by_controller: ", json_data)
                 return json_data[
                     "data"
                 ]  # this will be a list of lists, where the rows are the controllers (starting 0,1,2,3), and each holds the switches it controls (indexed starting at 1)
@@ -155,8 +161,16 @@ class NetworkSimEnv(gym.Env):
             if response.status_code != 200:
                 raise Exception(f"Failed to reset network: {response.text}")
 
-            # Get initial observation after confirmed reset
-            observation = self._get_obs()
+            # Add warm-up period to wait for initial flow statistics
+            warmup_steps = 18  # Number of steps to wait for flow statistics
+            for i in range(warmup_steps):
+                time.sleep(self.step_time)
+                # Poll for state to check if flows have started
+                observation = self._get_obs()
+                if (
+                    np.any(observation != 0) and i > 1
+                ):  # If any non-zero values are present
+                    break
 
             if self.render_mode == "human":
                 self._render_frame()
@@ -190,7 +204,7 @@ class NetworkSimEnv(gym.Env):
         # send the migration action to the global controller.
         data = {"target_controller": w, "switch": e}
 
-        print(f"migrate request data: {data}")
+        # print(f"migrate request data: {data}")
         # print(
         #     f"Current switch configuration before migration: {self.switches_by_controller}"
         # )
@@ -226,45 +240,34 @@ class NetworkSimEnv(gym.Env):
         observation = self._get_obs()
         # compute the reward
 
-        # compute the load ratio for each one (the steps below here would actually take place in the deep learning training loop.)
-        # compute Lh(t) by summing each row of the state matrix
-        L = np.sum(observation, axis=1)
-        # print("L: ", L)
+        # Compute loads and ratios
+        L = np.sum(observation, axis=1)  # Controller loads
+        B = L / self.capacities  # Load ratios
+        B_bar = np.sum(B) / self.m  # Average load ratio
 
-        # compute Bh(t) by dividing each by uh (capacities)
-        B = L / self.capacities
-        # print("load_ratios: ", B)
-
-        # compute B_bar (average load) by
-        B_bar = np.sum(B) / self.m
-        # print("average load: ", B_bar)
-
-        # compute the controller load balancing rate, D(t)
-        D_t = 0
-        numerator = np.sqrt(
-            np.sum((B - B_bar) ** 2) / self.m
-        )  # Compute standard deviation
-        if B_bar != 0:
-            D_t = numerator / B_bar  # Final computation
-            # print("D_t (degree of balancing): ", D_t)
+        # Compute load balancing rate (D_t) properly
+        if B_bar > 0:
+            D_t = np.sqrt(np.sum((B - B_bar) ** 2) / self.m) / B_bar
         else:
-            D_t = 1
+            D_t = 1.0  # Maximum imbalance when no load
 
-        reward = 0
-        if self.D_t_prev != None:
-            # then it hasn't run before, we set it, and reward is 0.
-            reward = (
-                self.D_t_prev - D_t
-            )  # positive reward for the D_t getting smaller each iteration.
-        self.D_t_prev = D_t
-        # TODO compute the switch migration cost.
+        # Calculate reward based on load imbalance
+        reward = -D_t  # Negative reward for imbalance
+
+        # Update historical loads for better tracking
+        self.historical_loads.append(L.copy())
+        if len(self.historical_loads) > 10:  # Keep last 10 steps
+            self.historical_loads.pop(0)
+
+        # Check if done
+        done = False
+        truncated = False
+        info = {"load_ratios": B, "balancing_rate": D_t, "average_load": B_bar}
 
         if self.render_mode == "human":
             self._render_frame()
 
-        info = self._get_info()
-
-        return observation, reward, False, False, info
+        return observation, reward, done, truncated, info
 
     def render(self):
         if self.render_mode == "human":
@@ -330,3 +333,42 @@ class NetworkSimEnv(gym.Env):
             self.clock.tick(self.metadata["render_fps"])
         # else:  # rgb_array
         #     return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
+
+    def close(self):
+        """
+        Cleanly shut down the environment by sending stop requests to both the global controller
+        and topology wrapper.
+        """
+        try:
+            # First try to stop the global controller
+            gc_url = f"{self.gc_base_url}stop"
+            try:
+                response = requests.post(gc_url, timeout=5)
+                if response.status_code != 200:
+                    print(
+                        f"Warning: Failed to stop global controller: {response.status_code}"
+                    )
+            except requests.exceptions.RequestException as e:
+                print(f"Warning: Error stopping global controller: {e}")
+
+            # Then try to stop the topology wrapper
+            wrapper_url = "http://localhost:9000/stop_topology"
+            try:
+                response = requests.post(wrapper_url, timeout=5)
+                if response.status_code != 200:
+                    print(
+                        f"Warning: Failed to stop topology wrapper: {response.status_code}"
+                    )
+            except requests.exceptions.RequestException as e:
+                print(f"Warning: Error stopping topology wrapper: {e}")
+
+            # Close pygame window if it exists
+            if self.window is not None:
+                import pygame
+
+                pygame.quit()
+                self.window = None
+                self.clock = None
+
+        except Exception as e:
+            print(f"Warning: Error during environment cleanup: {e}")

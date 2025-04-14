@@ -20,7 +20,7 @@ import multiprocessing
 setLogLevel("info")  # Options: 'debug', 'info', 'warning', 'error', 'critical'
 
 
-class JanosUSTopology():
+class JanosUSTopology:
     """
     A class that handles the Janos-US network topology creation and management
     for use with a Gym environment.
@@ -119,90 +119,110 @@ class JanosUSTopology():
         ]
 
         self.src_dst_pairs = [
-            (1, 6),
-            (2, 5),
-            (3, 2),
-            (4, 21),
-            (5, 8),
-            (6, 8),
-            (7, 17),
-            (8, 6),
-            (9, 19),
-            (10, 2),
-            (11, 5),
-            (12, 20),
-            (13, 1),
-            (14, 19),
-            (15, 4),
-            (16, 19),
-            (17, 16),
-            (18, 11),
-            (19, 18),
+            # Extremely heavy traffic in Domain 4 (switches 20-26)
             (20, 11),
+            (20, 13),
+            (20, 1),  # Domain 4 -> Multiple domains
             (21, 13),
+            (21, 2),
+            (21, 15),  # Domain 4 -> Multiple domains
             (22, 25),
+            (22, 26),
+            (22, 24),  # Internal Domain 4 (heavy internal traffic)
             (23, 1),
+            (23, 8),
+            (23, 14),  # Domain 4 -> Multiple domains
             (24, 5),
+            (24, 25),
+            (24, 26),  # Domain 4 mix of internal and external
             (25, 17),
+            (25, 22),
+            (25, 20),  # Domain 4 mix of internal and external
             (26, 22),
+            (26, 23),
+            (26, 21),  # More internal Domain 4 traffic
+            # Medium-heavy traffic in Domain 1 (switches 1-7)
+            (1, 6),
+            (1, 20),  # Internal and external
+            (2, 5),
+            (2, 21),  # Internal and external
+            (3, 20),
+            (3, 4),  # Internal and external
+            (4, 21),
+            (4, 7),  # Internal and external
+            # Light traffic in Domain 2 (switches 8-13)
+            (8, 6),  # Domain 2 -> Domain 1
+            (9, 19),  # Domain 2 -> Domain 3
+            (10, 2),  # Domain 2 -> Domain 1
+            # Minimal traffic in Domain 3 (switches 14-19)
+            (14, 19),  # Single internal flow
+            (15, 16),  # Single internal flow
         ]
 
         self.base_rates = [
-            2,
-            2,
-            8,
-            6,
-            8,
-            8,
+            # Domain 1 (switches 1-7): Medium-high base rate
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            # Domain 2 (switches 8-13): Low base rate
             10,
-            3,
-            8,
-            6,
-            9,
-            6,
-            9,
             10,
-            2,
-            6,
-            3,
-            4,
-            8,
             10,
+            10,
+            10,
+            10,
+            # Domain 3 (switches 14-19): Very low base rate
             5,
-            9,
             5,
-            8,
-            1,
-            10,
+            5,
+            5,
+            5,
+            5,
+            # Domain 4 (switches 20-26): Extremely high base rate
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
         ]
 
         self.fluctuation_amplitudes = [
-            0.06,
-            0.64,
-            0.41,
-            0.56,
-            0.72,
-            0.45,
-            0.74,
-            0.79,
-            0.25,
-            0.32,
-            0.32,
-            0.68,
-            0.49,
-            0.95,
-            0.93,
-            0.34,
-            0.17,
-            0.85,
-            0.68,
-            0.73,
-            0.95,
-            0.64,
-            0.97,
-            0.32,
-            0.93,
-            0.11,
+            # Domain 1: Medium fluctuation
+            0.4,
+            0.4,
+            0.4,
+            0.4,
+            0.4,
+            0.4,
+            0.4,
+            # Domain 2: Low fluctuation
+            0.3,
+            0.3,
+            0.3,
+            0.3,
+            0.3,
+            0.3,
+            # Domain 3: Minimal fluctuation
+            0.1,
+            0.1,
+            0.1,
+            0.1,
+            0.1,
+            0.1,
+            # Domain 4: High fluctuation
+            0.6,
+            0.6,
+            0.6,
+            0.6,
+            0.6,
+            0.6,
+            0.6,
         ]
 
         # Define parameters for the simulation
@@ -221,13 +241,59 @@ class JanosUSTopology():
         if self.net:
             self.net.stop()
         os.system("sudo mn -c")
-    
+
     def stop(self):
-        '''
-        used by threading to indicate that the thread should terminate.
-        Useful for reset. 
-        '''
-        self._stop_event.set()
+        """
+        Clean up topology resources
+        """
+        try:
+            # Kill any running iperf processes first
+            if hasattr(self, "net") and self.net:
+                for host in self.net.hosts:
+                    host.cmd("killall -9 iperf")
+
+            # Stop all processes
+            if hasattr(self, "processes"):
+                for p in self.processes:
+                    if p and p.is_alive():
+                        p.terminate()
+                        p.join()
+
+            # Set stop flags
+            if hasattr(self, "stop_simulation"):
+                self.stop_simulation.value = True
+            if hasattr(self, "is_resetting"):
+                self.is_resetting.value = True
+
+            # Stop the network
+            if hasattr(self, "net") and self.net:
+                info("*** Stopping network\n")
+                # Clear flow tables
+                for switch in self.net.switches:
+                    switch.cmd(
+                        'ovs-ofctl del-flows {} "priority=1"'.format(switch.name)
+                    )
+                self.net.stop()
+
+            # Clean up OVS configurations
+            info("*** Cleaning up...\n")
+            os.system("sudo mn -c")
+
+            # Clear references
+            self.net = None
+            self.switches = {}
+            self.hosts = {}
+            self.controllers = {}
+            self.processes = []
+
+        except Exception as e:
+            info(f"*** Error during topology cleanup: {str(e)}\n")
+            # Continue with cleanup even if there's an error
+            try:
+                os.system("sudo mn -c")
+            except:
+                pass
+            raise
 
     def create_network(self):
         """
@@ -340,6 +406,7 @@ class JanosUSTopology():
             for switch in self.net.switches:
                 switch.cmd('ovs-ofctl del-flows {} "priority=1"'.format(switch.name))
             self.net.stop()
+            os.system("sudo mn -c")
 
             # Clear references
             self.net = None
@@ -484,31 +551,44 @@ class JanosUSTopology():
             info(f"*** Error in Poisson process: {str(e)}\n")
 
     def start_iperf_flow(self, src_host, dst_host, current_hour):
-        """Start an iperf flow between source and destination hosts."""
+        """Modified iperf flow with variable duration and bandwidth based on domain"""
         try:
             if not src_host.intf() or not dst_host.intf():
-                return  # Skip if interfaces are not available
+                return
 
             port = random.randint(5000, 6000)
 
-            # Start iperf server on destination
-            dst_host.cmd(
-                f"iperf -s -u -p {port} -t {self.flow_duration+5} > /dev/null 2>&1 &"
-            )
+            # Determine flow duration and bandwidth based on source domain
+            src_num = int(src_host.name[1:])  # Extract number from host name
 
-            # Start iperf client on source with fixed bandwidth
-            bw = 10
-            bw_str = f"{bw}M"
+            if src_num <= 7:  # Domain 1
+                duration = self.flow_duration * 2  # Medium duration
+                bw = random.uniform(15, 25)  # Medium-high bandwidth
+            elif src_num <= 13:  # Domain 2
+                duration = self.flow_duration  # Normal duration
+                bw = random.uniform(8, 12)  # Low bandwidth
+            elif src_num <= 19:  # Domain 3
+                duration = int(self.flow_duration * 0.5)  # Short duration
+                bw = random.uniform(3, 7)  # Very low bandwidth
+            else:  # Domain 4
+                duration = self.flow_duration * 4  # Very long duration
+                bw = random.uniform(40, 60)  # Very high bandwidth
+
+            bw_str = f"{int(bw)}M"
+
+            # Start iperf server with extra time for cleanup
+            dst_host.cmd(f"iperf -s -u -p {port} -t {duration+5} > /dev/null 2>&1 &")
+
+            # Start iperf client with variable duration
             src_host.cmd(
-                f"iperf -c {dst_host.IP()} -u -p {port} -t {self.flow_duration} -b {bw_str} > /dev/null 2>&1 &"
+                f"iperf -c {dst_host.IP()} -u -p {port} -t {duration} -b {bw_str} > /dev/null 2>&1 &"
             )
 
             info(
-                f"  Flow at {current_hour:.2f}h: {src_host.name} -> {dst_host.name} ({bw_str}, {self.flow_duration}s)\n"
+                f"  Flow at {current_hour:.2f}h: {src_host.name} -> {dst_host.name} ({bw_str}, {duration}s)\n"
             )
         except Exception as e:
             info(f"*** Error starting iperf flow: {str(e)}\n")
-
 
 
 if __name__ == "__main__":
